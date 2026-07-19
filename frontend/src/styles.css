@@ -292,6 +292,91 @@ p {
 .hero-track {
   padding-left: 5vw;
 }
+.hero-track .track-map {
+  display: block;
+}
+.hero-track-details {
+  border: 1px solid var(--line);
+  border-top: 0;
+}
+.hero-track-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+.hero-track-heading span,
+.hero-track-facts span,
+.hero-track-schedule span {
+  display: block;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+.hero-track-heading h2 {
+  margin: 3px 0 0;
+  font: 600 22px "Barlow Condensed Variable";
+  text-transform: uppercase;
+}
+.hero-track-heading p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.hero-track-heading > a {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.hero-track-heading > a svg {
+  width: 14px;
+}
+.hero-track-facts,
+.hero-track-schedule {
+  display: grid;
+}
+.hero-track-facts {
+  grid-template-columns: repeat(3, 1fr);
+  border-bottom: 1px solid var(--line);
+}
+.hero-track-facts > div,
+.hero-track-schedule > div {
+  padding: 14px 20px;
+  border-right: 1px solid var(--line);
+}
+.hero-track-facts > div:last-child,
+.hero-track-schedule > div:last-child {
+  border-right: 0;
+}
+.hero-track-facts strong,
+.hero-track-schedule strong,
+.hero-track-schedule small {
+  display: block;
+}
+.hero-track-facts strong {
+  margin-top: 4px;
+  font: 600 19px "Barlow Condensed Variable";
+}
+.hero-track-schedule {
+  grid-template-columns: repeat(2, 1fr);
+}
+.hero-track-schedule strong {
+  margin-top: 4px;
+  font-size: 12px;
+}
+.hero-track-schedule small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
 .ticker {
   min-height: 64px;
   display: grid;
@@ -753,6 +838,10 @@ p {
 .tab-panel {
   min-height: 430px;
 }
+.session-overview {
+  display: grid;
+  gap: 24px;
+}
 .table-wrap {
   overflow: auto;
   border: 1px solid var(--line);
@@ -1023,7 +1112,15 @@ footer {
     flex-direction: column;
   }
   .hero-track {
-    display: none;
+    padding-top: 35px;
+  }
+  .hero-track-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .hero-track-facts > div,
+  .hero-track-schedule > div {
+    padding: 12px;
   }
   .ticker {
     grid-template-columns: 80px 1fr;

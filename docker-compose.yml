@@ -1,39 +1,35 @@
 services:
-  db:
-    image: postgres:16-alpine
+  mongo:
+    image: mongo:8.0
     environment:
-      POSTGRES_DB: race_data
-      POSTGRES_USER: race
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-race-local}
+      MONGO_INITDB_ROOT_USERNAME: race
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-race-local}
+      MONGO_INITDB_DATABASE: race_data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U race -d race_data"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - mongo_data:/data/db
 
-  migrate:
+  api:
     build: ./backend
-    command: alembic upgrade head
     environment: &backend-env
-      DATABASE_URL: postgresql+psycopg://race:${POSTGRES_PASSWORD:-race-local}@db:5432/race_data
+      MONGODB_URL: mongodb://race:${MONGO_PASSWORD:-race-local}@mongo:27017/race_data?authSource=admin
+      MONGODB_DATABASE: race_data
       FASTF1_CACHE: /cache/fastf1
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      HISTORICAL_BACKFILL_ENABLED: ${HISTORICAL_BACKFILL_ENABLED:-false}
+      HISTORICAL_BACKFILL_START: ${HISTORICAL_BACKFILL_START:-1950}
+      TELEMETRY_BACKFILL_ENABLED: ${TELEMETRY_BACKFILL_ENABLED:-false}
     depends_on:
-      db:
+      mongo:
         condition: service_healthy
-
-  api:
-    build: ./backend
-    environment: *backend-env
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/ready')"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -45,10 +41,18 @@ services:
     command: python -m app.worker
     environment: *backend-env
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      mongo:
+        condition: service_healthy
     volumes:
       - fastf1_cache:/cache/fastf1
+
+  scheduler:
+    build: ./backend
+    command: python -m app.scheduler
+    environment: *backend-env
+    depends_on:
+      mongo:
+        condition: service_healthy
 
   web:
     build: ./frontend
@@ -59,6 +63,5 @@ services:
         condition: service_healthy
 
 volumes:
-  postgres_data:
+  mongo_data:
   fastf1_cache:
-

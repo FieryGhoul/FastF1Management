@@ -1,14 +1,12 @@
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, text
-
 from .config import get_settings
-from .database import SessionLocal, engine, init_db
 from .fastf1_adapter import FastF1Adapter
-from .models import Circuit, DerivedArtifact, Event, IngestionJob, Season
-from .services import find_circuit_for_event, parse_datetime, queue_job, sync_circuits, sync_schedule
+from .ingestion import persist_session_bundle, persist_telemetry, persist_track, sync_circuits, sync_season, sync_standings
+from .mongo import claim_job, database, init_mongo, queue_job, utcnow
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -16,111 +14,87 @@ logger = logging.getLogger("race-worker")
 settings = get_settings()
 
 
-def notify(db, event: str, job: IngestionJob) -> None:
-    if engine.dialect.name == "postgresql":
-        db.execute(text("SELECT pg_notify('race_updates', :payload)"), {"payload": f'{event}:{job.id}'})
+def log_event(event: str, job: dict, **detail) -> None:
+    logger.info(json.dumps({"event": event, "job_id": job["_id"], "kind": job["kind"], **detail}, default=str))
 
 
-def claim_job(db):
-    query = select(IngestionJob).where(IngestionJob.status == "queued").order_by(IngestionJob.created_at).limit(1)
-    if engine.dialect.name == "postgresql":
-        query = query.with_for_update(skip_locked=True)
-    job = db.scalar(query)
-    if job:
-        job.status = "running"
-        job.progress = 5
-        job.attempts += 1
-        job.updated_at = datetime.now(timezone.utc)
-        notify(db, "sync.started", job)
-        db.commit()
-    return job
-
-
-def process_job(db, adapter: FastF1Adapter, job: IngestionJob) -> None:
+def process_job(adapter: FastF1Adapter, job: dict) -> None:
+    job_id = job["_id"]
+    payload = job.get("payload", {})
     try:
-        if job.kind == "session":
-            session_id = job.payload["session_id"]
-            requested_kind = job.payload["artifact_kind"]
-            if requested_kind in {"telemetry", "track"}:
-                bundle = {requested_kind: adapter.session_artifact(session_id, requested_kind, job.payload.get("options", {}))}
-            else:
-                bundle = adapter.session_bundle(session_id)
-            for artifact_kind, result in bundle.items():
-                key = (job.payload.get("artifact_key", job.key) if artifact_kind == requested_kind else
-                       adapter.artifact_key(session_id, artifact_kind, {}))
-                artifact = db.get(DerivedArtifact, key)
-                if artifact:
-                    artifact.payload = result
-                else:
-                    db.add(DerivedArtifact(key=key, kind=artifact_kind, payload=result))
-            track_result = bundle.get("track")
-            if track_result and track_result.get("availability") == "available":
-                year, round_number, _ = adapter.parse_session_id(job.payload["session_id"])
-                event = db.get(Event, f"{year}-{round_number}")
-                if event:
-                    circuit = find_circuit_for_event(db, event)
-                    if circuit:
-                        circuit.map_data = track_result["data"]
-        elif job.kind == "season":
-            sync_schedule(db, adapter, int(job.payload["season"]))
-        elif job.kind == "circuits":
-            sync_circuits(db, adapter, job.payload.get("season"))
+        database.jobs.update_one({"_id": job_id}, {"$set": {"progress": 20, "updated_at": utcnow()}})
+        if job["kind"] == "season":
+            season = int(payload["season"])
+            result = sync_season(database, adapter, season)
+            now = utcnow()
+            for event in database.events.find({"season": season}, {"round": 1, "sessions": 1}):
+                race = next((item for item in event.get("sessions", []) if item.get("code") == "R"), None)
+                race_start = datetime.fromisoformat(race["starts_at"]) if race and race.get("starts_at") else None
+                if race_start and race_start.tzinfo is None:
+                    race_start = race_start.replace(tzinfo=timezone.utc)
+                if race_start and race_start < now:
+                    for standings_kind in ("drivers", "constructors"):
+                        queue_job(
+                            database, "standings", f"standings:{season}:{event['round']}:{standings_kind}",
+                            {"season": season, "round": event["round"], "standings_kind": standings_kind},
+                        )
+        elif job["kind"] == "circuits":
+            result = {"circuits": sync_circuits(database, adapter, payload.get("season"))}
+        elif job["kind"] == "session":
+            result = persist_session_bundle(database, adapter, payload["session_id"])
+        elif job["kind"] == "track":
+            result = persist_track(database, adapter, payload["session_id"])
+        elif job["kind"] == "telemetry":
+            result = {"telemetry_laps": persist_telemetry(database, adapter, payload["session_id"])}
+        elif job["kind"] == "standings":
+            result = {"rows": sync_standings(
+                database, adapter, int(payload["season"]), int(payload["round"]), payload["standings_kind"],
+            )}
+        elif job["kind"] == "backfill":
+            start = max(1950, int(payload.get("start", 1950)))
+            end = int(payload.get("end", utcnow().year))
+            for year in range(end, start - 1, -1):
+                queue_job(database, "season", f"season:{year}", {"season": year})
+            database.sync_controls.replace_one(
+                {"_id": "historical_backfill"},
+                {"_id": "historical_backfill", "active": True, "start": start, "end": end,
+                 "include_telemetry": bool(payload.get("include_telemetry", False)), "updated_at": utcnow()},
+                upsert=True,
+            )
+            result = {"queued_seasons": end - start + 1}
         else:
-            raise ValueError(f"Unknown job kind: {job.kind}")
-        job.status = "completed"
-        job.progress = 100
-        job.error = None
-        notify(db, "sync.completed", job)
+            raise ValueError(f"Unknown job kind: {job['kind']}")
+        database.jobs.update_one(
+            {"_id": job_id},
+            {"$set": {"status": "completed", "progress": 100, "error": None, "result": result, "updated_at": utcnow()}},
+        )
+        log_event("sync.completed", job, result=result)
     except Exception as exc:
-        logger.exception("Job %s failed", job.id)
-        job.status = "failed"
-        job.error = str(exc)
-        notify(db, "sync.failed", job)
-    finally:
-        job.updated_at = datetime.now(timezone.utc)
-        db.commit()
+        attempts = int(job.get("attempts", 1))
+        transient = attempts < 3
+        update = {
+            "status": "queued" if transient else "failed",
+            "progress": 0 if transient else int(job.get("progress", 5)),
+            "error": str(exc),
+            "updated_at": utcnow(),
+        }
+        if transient:
+            update["scheduled_for"] = utcnow() + timedelta(minutes=2 ** attempts)
+        database.jobs.update_one({"_id": job_id}, {"$set": update})
+        log_event("sync.retry_scheduled" if transient else "sync.failed", job, error=str(exc), attempts=attempts)
+        logger.exception("Ingestion failed")
 
 
 def run_forever() -> None:
-    init_db()
+    init_mongo()
     adapter = FastF1Adapter(settings.fastf1_cache)
-    with SessionLocal() as db:
-        now = datetime.now(timezone.utc)
-        logger.info("Prewarming current season schedule and circuit index")
-        sync_schedule(db, adapter, now.year)
-        sync_circuits(db, adapter, now.year)
-        recent_sessions = sorted(
-            [(parse_datetime(item.get("starts_at")), item["id"])
-             for event in db.scalars(select(Event).where(Event.season == now.year)).all()
-             for item in event.raw.get("sessions", []) if item.get("starts_at") and parse_datetime(item["starts_at"]) < now - timedelta(hours=3)],
-            reverse=True,
-        )
-        if recent_sessions:
-            session_id = recent_sessions[0][1]
-            queue_job(db, "session", adapter.bundle_key(session_id),
-                      {"session_id": session_id, "artifact_kind": "summary",
-                       "artifact_key": adapter.artifact_key(session_id, "summary", {}), "options": {}})
-    logger.info("FastF1 worker started; current indexes are warm")
+    logger.info(json.dumps({"event": "worker.started", "database": settings.mongodb_database}))
     while True:
-        with SessionLocal() as db:
-            now = datetime.now(timezone.utc)
-            season = db.get(Season, now.year)
-            events = db.scalars(select(Event).where(Event.season == now.year)).all()
-            near_event = any(
-                abs((parse_datetime(item.get("starts_at")) - now).total_seconds()) <= 36 * 3600
-                for event in events for item in event.raw.get("sessions", []) if item.get("starts_at")
-            )
-            interval = timedelta(minutes=5) if near_event else timedelta(hours=6)
-            if season and season.last_synced_at:
-                age = now - season.last_synced_at.replace(tzinfo=timezone.utc)
-                if age >= interval:
-                    queue_job(db, "season", f"season:{now.year}", {"season": now.year})
-            elif not db.scalar(select(IngestionJob).where(IngestionJob.key == f"season:{now.year}", IngestionJob.status.in_(["queued", "running"]))):
-                queue_job(db, "season", f"season:{now.year}", {"season": now.year})
-            job = claim_job(db)
-            if job:
-                process_job(db, adapter, job)
-        if not job:
+        job = claim_job(database)
+        if job:
+            log_event("sync.started", job)
+            process_job(adapter, job)
+        else:
             time.sleep(settings.worker_poll_seconds)
 
 

@@ -6,7 +6,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   Activity,
@@ -14,6 +14,7 @@ import {
   CalendarDays,
   Check,
   Clock3,
+  Database,
   Gauge,
   LockKeyhole,
   Map,
@@ -54,12 +55,6 @@ export function HomePage() {
     queryFn: () => api<LiveState>("/live"),
     refetchInterval: 60_000,
   });
-  if (error)
-    return (
-      <div className="page">
-        <ErrorState error={error} />
-      </div>
-    );
   const events = data?.data ?? [],
     now = Date.now();
   const next =
@@ -74,6 +69,52 @@ export function HomePage() {
       e.sessions.at(-1)?.starts_at &&
       new Date(e.sessions.at(-1)!.starts_at!).getTime() < now,
   );
+  const circuits = useQuery({
+    queryKey: ["circuits"],
+    queryFn: () => api<ApiEnvelope<Circuit[]>>("/circuits"),
+  });
+  const nextCircuit = circuits.data?.data.find((circuit) => {
+    const location = next?.location?.toLowerCase();
+    return Boolean(
+      location &&
+        (circuit.locality?.toLowerCase() === location ||
+          circuit.name.toLowerCase().includes(location)),
+    );
+  });
+  const homeMap = useQuery({
+    queryKey: ["circuit-map", nextCircuit?.slug],
+    queryFn: () => api<any>(`/circuits/${nextCircuit!.slug}/map`),
+    enabled: Boolean(nextCircuit && !nextCircuit.map_data),
+    refetchInterval: (result) =>
+      result.state.data?.availability === "awaiting_data" ? 1000 : false,
+  });
+  const homeMapData = nextCircuit?.map_data ?? homeMap.data?.data;
+  const measuredDistance = (homeMapData?.points ?? []).reduce(
+    (maximum: number, point: { Distance?: number }) =>
+      Math.max(maximum, point.Distance ?? 0),
+    0,
+  );
+  const lapLength =
+    nextCircuit?.length_km ??
+    (measuredDistance > 0 ? measuredDistance / 1000 : undefined);
+  const nextSession =
+    live.data?.session ??
+    next?.sessions.find(
+      (session) =>
+        session.starts_at && new Date(session.starts_at).getTime() > now,
+    );
+  const raceSession = next?.sessions.find((session) => session.code === "R");
+  const cornerCount = new Set(
+    (homeMapData?.corners ?? [])
+      .map((corner: { Number?: number }) => corner.Number)
+      .filter((number: number | undefined) => number != null),
+  ).size;
+  if (error)
+    return (
+      <div className="page">
+        <ErrorState error={error} />
+      </div>
+    );
   return (
     <div className="page home-page">
       <section className="hero">
@@ -100,7 +141,56 @@ export function HomePage() {
           </div>
         </div>
         <div className="hero-track">
-          <TrackMap label={next?.location ?? "NEXT CIRCUIT"} />
+          <TrackMap
+            label={next?.location ?? "NEXT CIRCUIT"}
+            points={homeMapData?.points}
+            corners={homeMapData?.corners}
+            rotation={homeMapData?.rotation}
+          />
+          {next && nextCircuit && (
+            <div className="hero-track-details">
+              <div className="hero-track-heading">
+                <div>
+                  <span>Next circuit</span>
+                  <h2>{nextCircuit.name}</h2>
+                  <p>
+                    {nextCircuit.locality ?? next.location}, {next.country}
+                  </p>
+                </div>
+                <Link to={`/circuits/${nextCircuit.slug}`}>
+                  Circuit details <ArrowRight />
+                </Link>
+              </div>
+              <div className="hero-track-facts">
+                <div>
+                  <span>Round</span>
+                  <strong>{next.round}</strong>
+                </div>
+                <div>
+                  <span>Lap length</span>
+                  <strong>
+                    {lapLength ? `${lapLength.toFixed(3)} km` : "TBC"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Corners</span>
+                  <strong>{cornerCount || "TBC"}</strong>
+                </div>
+              </div>
+              <div className="hero-track-schedule">
+                <div>
+                  <span>Next on track</span>
+                  <strong>{nextSession?.name ?? "Schedule pending"}</strong>
+                  <small>{localDate(nextSession?.starts_at)}</small>
+                </div>
+                <div>
+                  <span>Grand Prix</span>
+                  <strong>{raceSession?.name ?? next.name}</strong>
+                  <small>{localDate(raceSession?.starts_at)}</small>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </section>
       <section className="ticker">
@@ -521,7 +611,7 @@ export function CircuitsPage() {
       <PageHeader
         eyebrow="Track atlas"
         title="Circuits"
-        copy="Circuit facts from curated SQL metadata, joined with FastF1 event and track information."
+        copy="Circuit facts from curated MongoDB metadata, joined with FastF1 event and track information."
       />
       <label className="search">
         <Search />
@@ -562,9 +652,16 @@ export function CircuitsPage() {
 export function CircuitDetailPage() {
   const { slug } = useParams(),
     [tab, setTab] = useState("Overview");
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["circuit", slug],
     queryFn: () => api<ApiEnvelope<Circuit>>(`/circuits/${slug}`),
+    placeholderData: () => {
+      const cached = queryClient
+        .getQueryData<ApiEnvelope<Circuit[]>>(["circuits"])
+        ?.data.find((circuit) => circuit.slug === slug);
+      return cached ? { data: cached } : undefined;
+    },
   });
   const c = query.data?.data;
   const mapQuery = useQuery({
@@ -572,7 +669,7 @@ export function CircuitDetailPage() {
     queryFn: () => api<any>(`/circuits/${slug}/map`),
     enabled: Boolean(c && !c.map_data),
     refetchInterval: (result) =>
-      ["queued", "running"].includes(result.state.data?.status) ? 1500 : false,
+      result.state.data?.availability === "awaiting_data" ? 1000 : false,
   });
   const mapData = c?.map_data ?? mapQuery.data?.data;
   if (query.error)
@@ -1007,14 +1104,26 @@ export function SessionPage() {
     refetchInterval: (result) =>
       ["queued", "running"].includes(result.state.data?.status) ? 1500 : false,
   });
+  const trackQuery = useQuery({
+    queryKey: ["session", sessionId, "track"],
+    queryFn: () => api<any>(`/sessions/${sessionId}/track`),
+    enabled: tab === "Overview" || tab === "Track",
+    refetchInterval: (result) =>
+      result.state.data?.availability === "awaiting_data" ? 1000 : false,
+  });
   const detailQuery = useQuery({
     queryKey: ["session", sessionId, kind, drivers, channels],
     queryFn: () => api<any>(path),
-    enabled: kind !== "summary",
+    enabled: kind !== "summary" && kind !== "track",
     refetchInterval: (result) =>
       ["queued", "running"].includes(result.state.data?.status) ? 1500 : false,
   });
-  const query = kind === "summary" ? summaryQuery : detailQuery;
+  const query =
+    kind === "summary"
+      ? summaryQuery
+      : kind === "track"
+        ? trackQuery
+        : detailQuery;
   const payload = query.data;
   const data = payload?.data;
   const sessionSummary = summaryQuery.data?.data;
@@ -1207,6 +1316,26 @@ export function SessionPage() {
             ))}
           </div>
         </div>
+      ) : tab === "Overview" && data ? (
+        <div className="session-overview">
+          <div className="metric-grid">
+            {Object.entries(data)
+              .slice(0, 8)
+              .map(([k, v]) => (
+                <Metric
+                  key={k}
+                  label={k.replaceAll("_", " ")}
+                  value={Array.isArray(v) ? v.length : String(v ?? "â€”")}
+                />
+              ))}
+          </div>
+          <TrackMap
+            label={sessionSummary?.location ?? sessionId}
+            points={trackQuery.data?.data?.points}
+            corners={trackQuery.data?.data?.corners}
+            rotation={trackQuery.data?.data?.rotation}
+          />
+        </div>
       ) : tab === "Track" && data ? (
         <TrackMap
           label={sessionId}
@@ -1288,7 +1417,14 @@ export function AdminPage() {
     const payload =
       kind === "season"
         ? { kind, season: currentYear }
-        : { kind: "circuits", season: currentYear };
+        : kind === "backfill" || kind === "full-backfill"
+          ? {
+              kind: "backfill",
+              start: 1950,
+              end: currentYear,
+              include_telemetry: kind === "full-backfill",
+            }
+          : { kind: "circuits", season: currentYear };
     const result = await api<Job>("/admin/sync", {
       method: "POST",
       headers: { "X-CSRF-Token": csrf },
@@ -1342,6 +1478,16 @@ export function AdminPage() {
               <Map />
               <b>Sync circuits</b>
               <span>Jolpica identities and locations</span>
+            </button>
+            <button onClick={() => sync("backfill")}>
+              <Database />
+              <b>Queue historical index</b>
+              <span>Schedules, rosters and standings from 1950</span>
+            </button>
+            <button onClick={() => sync("full-backfill")}>
+              <Activity />
+              <b>Queue full timing archive</b>
+              <span>2018+ laps, maps and per-lap telemetry</span>
             </button>
             <button onClick={() => cache.refetch()}>
               <Gauge />
@@ -1437,7 +1583,7 @@ function CircuitEditor({
     <section className="section">
       <div className="section-title">
         <div>
-          <span>Curated SQL data</span>
+          <span>Curated MongoDB data</span>
           <h2>Circuit metadata</h2>
         </div>
       </div>

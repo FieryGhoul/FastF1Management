@@ -1,12 +1,10 @@
-from pathlib import Path
+import pandas as pd
 
 from app.fastf1_adapter import FastF1Adapter, slugify
-from app.models import Circuit, Event
-from app.services import circuit_event_score
 
 
 def test_slugify_is_stable():
-    assert slugify("Autódromo José Carlos Pace") == "aut-dromo-jos-carlos-pace"
+    assert slugify("Autodromo Jose Carlos Pace") == "autodromo-jose-carlos-pace"
 
 
 def test_session_id_parser():
@@ -21,8 +19,13 @@ def test_artifact_keys_change_with_options():
     assert FastF1Adapter.bundle_key("2025-1-Q") == "v3:2025-1-Q:core-bundle"
 
 
-def test_circuit_matching_handles_event_location_aliases():
-    circuit = Circuit(slug="spa", name="Circuit de Spa-Francorchamps", country="Belgium", locality="Spa")
-    event = Event(id="2026-10", season=2026, round_number=10, name="Belgian Grand Prix",
-                  country="Belgium", location="Spa-Francorchamps")
-    assert circuit_event_score(circuit, event) >= 80
+def test_historical_results_are_normalized_for_the_frontend():
+    frame = pd.DataFrame([{
+        "position": 1, "grid": 2, "driverCode": "FAR", "number": 2,
+        "givenName": "Nino", "familyName": "Farina", "constructorName": "Alfa Romeo",
+        "points": 9.0, "status": "Finished", "totalRaceTime": pd.Timedelta(minutes=120),
+    }])
+    row = FastF1Adapter._historical_results(frame)[0]
+    assert row["Abbreviation"] == "FAR"
+    assert row["FullName"] == "Nino Farina"
+    assert row["Time"] == 7_200_000

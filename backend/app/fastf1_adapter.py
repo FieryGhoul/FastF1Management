@@ -1,5 +1,6 @@
 import hashlib
 import re
+import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,15 @@ class FastF1Adapter:
         fastf1.Cache.enable_cache(str(cache_dir))
         self.ergast = Ergast(result_type="pandas", auto_cast=True, limit=1000)
         self._loaded_sessions: OrderedDict[str, tuple[Any, bool]] = OrderedDict()
+        self._last_ergast_request = 0.0
+
+    def _wait_for_ergast(self) -> None:
+        """Keep Jolpica usage below its documented 500-request/hour cap."""
+        interval = 8.0
+        elapsed = time.monotonic() - getattr(self, "_last_ergast_request", 0.0)
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
+        self._last_ergast_request = time.monotonic()
 
     def schedule(self, year: int) -> list[dict[str, Any]]:
         frame = fastf1.get_event_schedule(year, include_testing=False)
@@ -65,6 +75,7 @@ class FastF1Adapter:
         return output
 
     def standings(self, year: int, kind: str, round_number: int | None = None) -> list[dict[str, Any]]:
+        self._wait_for_ergast()
         kwargs = {"season": year, "round": round_number}
         response = (self.ergast.get_driver_standings(**kwargs) if kind == "drivers"
                     else self.ergast.get_constructor_standings(**kwargs))
@@ -73,14 +84,17 @@ class FastF1Adapter:
         return records(response.content[0])
 
     def circuits(self, year: int | None = None) -> list[dict[str, Any]]:
+        self._wait_for_ergast()
         response = self.ergast.get_circuits(season=year)
         return records(response)
 
     def drivers(self, year: int) -> list[dict[str, Any]]:
+        self._wait_for_ergast()
         response = self.ergast.get_driver_info(season=year)
         return records(response)
 
     def constructors(self, year: int) -> list[dict[str, Any]]:
+        self._wait_for_ergast()
         response = self.ergast.get_constructor_info(season=year)
         return records(response)
 
@@ -139,6 +153,8 @@ class FastF1Adapter:
             "Q": self.ergast.get_qualifying_results,
             "S": self.ergast.get_sprint_results,
         }.get(code)
+        if endpoint:
+            self._wait_for_ergast()
         response = endpoint(season=year, round=round_number) if endpoint else None
         description = (
             response.description.iloc[0].to_dict()
@@ -244,6 +260,49 @@ class FastF1Adapter:
         return {"availability": "available", "unavailable_reason": None, "data": data,
                 "source": "FastF1", "updated_at": datetime.now(timezone.utc).isoformat()}
 
+    def session_telemetry_laps(self, session_id: str) -> list[dict[str, Any]]:
+        """Materialize combined car/position telemetry as one Mongo-friendly document per lap."""
+        year, _, _ = self.parse_session_id(session_id)
+        if year < 2018:
+            return []
+        session = self.load_session(session_id, telemetry=True)
+        documents: list[dict[str, Any]] = []
+        columns = [
+            "Distance", "Time", "SessionTime", "Date", "Speed", "RPM",
+            "Throttle", "Brake", "nGear", "DRS", "X", "Y", "Z",
+            "Status", "Source",
+        ]
+        # FastF1 3.8 converts ``require`` to a set internally.  Pandas 2.3+
+        # rejects sets as indexers, so iterlaps(require=...) fails before the
+        # first lap is yielded.  Indexed access still returns FastF1 ``Lap``
+        # objects and is compatible with all supported pandas 2.x releases.
+        for index in range(len(session.laps)):
+            lap = session.laps.iloc[index]
+            if pd.isna(lap.get("Driver")) or pd.isna(lap.get("LapNumber")):
+                continue
+            try:
+                telemetry = lap.get_telemetry()
+                if "Distance" not in telemetry.columns:
+                    telemetry = telemetry.add_distance()
+                if telemetry.empty:
+                    continue
+                documents.append(clean({
+                    "session_id": session_id,
+                    "driver": lap.get("Driver"),
+                    "driver_number": lap.get("DriverNumber"),
+                    "lap": lap.get("LapNumber"),
+                    "lap_time": lap.get("LapTime"),
+                    "sector_1": lap.get("Sector1Time"),
+                    "sector_2": lap.get("Sector2Time"),
+                    "sector_3": lap.get("Sector3Time"),
+                    "compound": lap.get("Compound"),
+                    "is_accurate": lap.get("IsAccurate"),
+                    "points": records(telemetry, columns),
+                }))
+            except Exception:
+                continue
+        return documents
+
     def _summary(self, session, _: dict[str, Any]) -> dict[str, Any]:
         try:
             total_laps = session.total_laps
@@ -308,7 +367,9 @@ class FastF1Adapter:
             laps = session.laps.pick_drivers(driver)
             lap_choice = options.get("laps", "fastest")
             lap = laps.pick_fastest() if lap_choice == "fastest" else laps[laps["LapNumber"] == int(lap_choice)].iloc[0]
-            telemetry = lap.get_telemetry().add_distance()
+            telemetry = lap.get_telemetry()
+            if "Distance" not in telemetry.columns:
+                telemetry = telemetry.add_distance()
             stride = max(1, int(np.ceil(len(telemetry) / 1500)))
             columns = ["Distance", "Time", "X", "Y", *allowed]
             traces.append({"driver": driver, "lap": clean(lap.get("LapNumber")),

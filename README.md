@@ -1,32 +1,48 @@
 # Race Data
 
-A deployable Formula 1 data platform built with React, TypeScript, FastAPI, PostgreSQL and [FastF1](https://docs.fastf1.dev/). It covers calendars, near-live session availability, historical standings, drivers, constructors, circuits and queued lap-level telemetry analysis.
+A Formula 1 data platform built with React, TypeScript, FastAPI, MongoDB and FastF1 3.8. The active application contains no SQL datastore or SQL migration layer.
 
-The interface intentionally distinguishes scheduled or in-progress sessions from downloadable detailed timing. FastF1 normally makes timing and telemetry available after a session; this project does not present delayed data as raw live timing.
+## Architecture
 
-## Stack
+```text
+cron scheduler -> MongoDB job queue -> FastF1 worker -> MongoDB
+                                                    -> persistent FastF1 cache
 
-- React 19, TypeScript, Vite, TanStack Query and Apache ECharts
-- FastAPI, SQLAlchemy, Alembic and FastF1 3.8
-- PostgreSQL 16 in deployment; SQLite is the zero-configuration local fallback
-- Dedicated ingestion worker with persistent FastF1 cache
-- WebSocket job updates and protected operator tools
-- Nginx and Docker Compose
+React frontend -> FastAPI read API -> MongoDB
+```
+
+The API process never calls FastF1 or Jolpica. It returns data already stored in MongoDB, including an explicit availability state and source timestamp. The scheduler creates idempotent jobs, and one or more workers claim jobs atomically through MongoDB.
+
+## Stored data
+
+MongoDB collections cover seasons, events, sessions, drivers, constructors, circuits, standings, results, laps, strategies, weather, race-control messages, per-lap telemetry, derived artifacts, dataset freshness, ingestion jobs, admin users and admin sessions.
+
+Telemetry is stored as one document per driver lap. Browser responses select the requested lap, downsample each trace to at most 1,500 points and calculate two-driver delta from stored samples. Canonical circuit maps are stored once on the circuit and reused for historical sessions that do not have position data.
 
 ## Run locally
 
-Python 3.12 is recommended. The current code also passes its test suite on Python 3.14.
+MongoDB must be running locally on port 27017. Python 3.12 and a supported Node LTS release are recommended.
+
+Create `backend/.env` if your MongoDB connection differs from the default:
+
+```env
+MONGODB_URL=mongodb://localhost:27017
+MONGODB_DATABASE=race_data
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=change-me
+```
+
+Start the API:
 
 ```powershell
 cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-alembic upgrade head
-uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload
 ```
 
-In a second terminal, start the worker:
+Start the ingestion worker in a second terminal:
 
 ```powershell
 cd backend
@@ -34,7 +50,15 @@ cd backend
 python -m app.worker
 ```
 
-In a third terminal, start the frontend:
+Start the scheduler in a third terminal:
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+python -m app.scheduler
+```
+
+Start the frontend in a fourth terminal:
 
 ```powershell
 cd frontend
@@ -42,30 +66,29 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. API documentation is available at `http://localhost:8000/api/docs`.
-
-Local development defaults to `admin` / `change-me`. Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` before using the Operations page outside local development.
+Open `http://localhost:5173`; API documentation is at `http://localhost:8000/api/docs`.
 
 ## Run with Docker
 
-Copy `.env.example` to `.env`, replace every example secret, and set `COOKIE_SECURE=true` behind HTTPS. Then run:
+Copy `.env.example` to `.env`, replace the passwords, then run:
 
 ```powershell
 docker compose up --build
 ```
 
-Open `http://localhost:8080`. The Compose stack runs PostgreSQL, migrations, API, ingestion worker, and the static frontend. PostgreSQL data and the FastF1 cache use named persistent volumes.
+Open `http://localhost:8080`. The stack contains MongoDB, API, worker, scheduler and frontend services, with persistent `mongo_data` and `fastf1_cache` volumes.
 
-## Data behavior
+## Scheduler policy
 
-- Calendar endpoints load lightweight FastF1 schedules on first request and persist normalized event/session indexes.
-- Session detail and telemetry endpoints return `202 Accepted` when an artifact is missing. The worker loads and caches it, while `/api/v1/updates` reports progress.
-- Worker startup prewarms the current schedule, circuit index, and most recently completed session. One core session load now materializes results, laps, strategy, weather, and race-control artifacts together.
-- Heavy car/position telemetry is loaded separately only for track maps or telemetry charts. Circuit pages automatically select a completed reference session, persist the real outline and markers, and reuse them on later visits.
-- Historical information uses FastF1's Jolpica-compatible API. Results may be incomplete for early seasons.
-- Detailed timing, telemetry and position data are intentionally limited to 2018 onward.
-- Telemetry endpoints accept at most two drivers and return at most 1,500 points per trace.
-- High-frequency FastF1 data remains in the persistent filesystem cache; PostgreSQL stores normalized domain records, jobs, curated facts and derived summaries.
+- Current schedule: every six hours, or every five minutes within 36 hours of a session.
+- Completed current-season sessions: core results/laps/weather/race-control refresh every six hours.
+- Circuit outlines: queued from completed race, qualifying or sprint reference sessions.
+- Detailed session ingestion starts at least 30 minutes after the expected end.
+- Failed jobs retry twice with exponential delay before becoming operator-visible failures.
+- Historical season backfill is controlled by `HISTORICAL_BACKFILL_ENABLED` or the Operations page.
+- Telemetry backfill is controlled by `TELEMETRY_BACKFILL_ENABLED` because a full 2018-present archive is large and slow.
+
+FastF1 does not provide supported raw real-time analysis. The Live interface reports scheduled, in-progress and awaiting-data states honestly and displays detailed data only after it has been stored.
 
 ## Verification
 
@@ -74,17 +97,12 @@ cd backend
 pytest -q
 
 cd ..\frontend
+npm run lint
 npm run build
 ```
 
-An online smoke check can be performed by starting the API and opening `/api/v1/calendar/<current-year>`. Unit tests do not depend on live upstream services.
+Tests use an in-memory MongoDB-compatible test double and do not require live upstream requests.
 
 ## Legacy application
 
-The original Oracle 21c, Tkinter and embedded Flask academic application is preserved unchanged in [`legacy/oracle-tkinter`](legacy/oracle-tkinter/README.md). It is not used by the new runtime.
-
-## Important limitations
-
-- FastF1's supported live timing client records a stream for later processing; it does not provide supported in-session real-time analysis.
-- Circuit length, first Grand Prix, lap record and related facts are curated through the private Operations workflow and include source URLs.
-- Upcoming weather forecasts, video, news, fantasy features and editing FastF1-authoritative race results are outside this project.
+The original Oracle/Tkinter application remains preserved under `legacy/oracle-tkinter/`. It is not imported or used by the active runtime.

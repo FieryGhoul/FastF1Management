@@ -1,0 +1,12 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+sqlalchemy==2.0.43
+psycopg[binary]>=3.2,<3.4
+alembic==1.16.4
+fastf1>=3.8,<3.9
+pandas>=2.2,<3
+argon2-cffi==25.1.0
+python-multipart==0.0.20
+pydantic-settings==2.10.1
+pytest==8.4.1
+httpx==0.28.1

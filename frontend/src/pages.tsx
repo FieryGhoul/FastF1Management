@@ -681,12 +681,21 @@ function DriverPortrait({
   return (
     <div className="driver-portrait">
       {imageUrl && !imageFailed ? (
-        <img
-          src={imageUrl}
-          alt={`${fullName} portrait`}
-          loading="lazy"
-          onError={() => setImageFailed(true)}
-        />
+        <>
+          <img
+            className="driver-portrait-backdrop"
+            src={imageUrl}
+            alt=""
+            aria-hidden="true"
+          />
+          <img
+            className="driver-portrait-image"
+            src={imageUrl}
+            alt={`${fullName} portrait`}
+            loading="lazy"
+            onError={() => setImageFailed(true)}
+          />
+        </>
       ) : (
         <span aria-hidden="true">{initials || "F1"}</span>
       )}

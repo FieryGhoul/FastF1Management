@@ -89,6 +89,19 @@ def test_stale_archive_checkpoint_does_not_pause_normal_backfill_forever():
     assert database.jobs.count_documents({"kind": "season", "status": "queued"}) == 2
 
 
+def test_historical_backfill_queues_the_complete_missing_calendar_range():
+    database.sync_controls.insert_one({
+        "_id": "historical_backfill", "active": True, "start": 1950,
+        "end": 1961, "include_telemetry": False,
+    })
+    counts = {"season": 0, "session": 0, "track": 0, "telemetry": 0, "backfill": 0}
+
+    schedule_historical_backfill(counts)
+
+    assert counts["backfill"] == 12
+    assert database.jobs.count_documents({"kind": "season", "status": "queued"}) == 12
+
+
 def test_current_year_race_telemetry_is_queued_ahead_of_archive_work(monkeypatch):
     import app.scheduler as scheduler_module
 

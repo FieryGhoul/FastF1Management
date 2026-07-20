@@ -18,6 +18,7 @@ import unicodedata
 import urllib.request
 import zipfile
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 
@@ -133,6 +134,7 @@ class JolpicaDump:
         self.root = Path(root)
         self.csv_dir = self.root / "csv"
         self.database_path = self.root / "jolpica.sqlite3"
+        self._prepare_lock = RLock()
 
     @property
     def source_available(self) -> bool:
@@ -149,21 +151,22 @@ class JolpicaDump:
         return digest.hexdigest()
 
     def prepare(self) -> bool:
-        if not self.source_available:
-            return False
-        fingerprint = self._fingerprint()
-        if self.database_path.is_file():
-            try:
-                with sqlite3.connect(self.database_path) as connection:
-                    row = connection.execute(
-                        "SELECT value FROM metadata WHERE key = 'fingerprint'"
-                    ).fetchone()
-                if row and row[0] == fingerprint:
-                    return True
-            except sqlite3.Error:
-                pass
-        self._build(fingerprint)
-        return True
+        with self._prepare_lock:
+            if not self.source_available:
+                return False
+            fingerprint = self._fingerprint()
+            if self.database_path.is_file():
+                try:
+                    with sqlite3.connect(self.database_path) as connection:
+                        row = connection.execute(
+                            "SELECT value FROM metadata WHERE key = 'fingerprint'"
+                        ).fetchone()
+                    if row and row[0] == fingerprint:
+                        return True
+                except sqlite3.Error:
+                    pass
+            self._build(fingerprint)
+            return True
 
     def download_delayed(self) -> dict[str, Any]:
         """Download, verify and safely extract Jolpica's free delayed dump."""
@@ -203,11 +206,15 @@ class JolpicaDump:
         return details
 
     def ensure(self) -> dict[str, Any]:
-        if not self.source_available:
-            details = self.download_delayed()
-            return {"downloaded": True, **details}
-        self.prepare()
-        return {"downloaded": False, "root": str(self.root)}
+        # A background worker may be downloading or indexing while a session
+        # request reaches the same adapter. Serialize preparation so neither
+        # path observes a partially extracted or partially indexed archive.
+        with self._prepare_lock:
+            if not self.source_available:
+                details = self.download_delayed()
+                return {"downloaded": True, **details}
+            self.prepare()
+            return {"downloaded": False, "root": str(self.root)}
 
     def _build(self, fingerprint: str) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from threading import Thread
 
 from .config import get_settings
 from .fastf1_adapter import FastF1Adapter
@@ -16,6 +17,17 @@ settings = get_settings()
 
 def log_event(event: str, job: dict, **detail) -> None:
     logger.info(json.dumps({"event": event, "job_id": job["_id"], "kind": job["kind"], **detail}, default=str))
+
+
+def prepare_historical_source(adapter: FastF1Adapter) -> None:
+    """Prepare the bulk archive without delaying durable queue processing."""
+    try:
+        dump = adapter.prepare_historical_dump()
+        logger.info(json.dumps({"event": "historical_dump.ready", **dump}, default=str))
+    except Exception:
+        # The worker can still use the paginated API while a later restart
+        # retries the faster verified bulk source.
+        logger.exception("Historical bulk source preparation failed")
 
 
 def process_job(adapter: FastF1Adapter, job: dict) -> None:
@@ -89,18 +101,17 @@ def run_forever() -> None:
     init_mongo()
     recovered = recover_stale_jobs(database)
     adapter = FastF1Adapter(settings.fastf1_cache)
-    if settings.historical_backfill_enabled:
-        try:
-            dump = adapter.prepare_historical_dump()
-            logger.info(json.dumps({"event": "historical_dump.ready", **dump}, default=str))
-        except Exception:
-            # The worker can still use the paginated API while a later
-            # restart retries the faster verified bulk source.
-            logger.exception("Historical bulk source preparation failed")
     logger.info(json.dumps({
         "event": "worker.started", "database": settings.mongodb_database,
         "recovered_stale_jobs": recovered,
     }))
+    if settings.historical_backfill_enabled:
+        Thread(
+            target=prepare_historical_source,
+            args=(adapter,),
+            name="historical-dump-prepare",
+            daemon=True,
+        ).start()
     while True:
         job = claim_job(database)
         if job:

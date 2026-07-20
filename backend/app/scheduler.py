@@ -92,9 +92,11 @@ def schedule_historical_backfill(counts: dict[str, int]) -> None:
     end = int(control.get("end", utcnow().year - 1) if control else utcnow().year - 1)
     include_telemetry = bool(control.get("include_telemetry", settings.telemetry_backfill_enabled) if control else settings.telemetry_backfill_enabled)
     missing_years = [year for year in range(end, max(1949, start - 1), -1) if not database.seasons.find_one({"_id": year})]
-    # Keep enough metadata work queued that the worker never waits for the
-    # next scheduler tick while filling the 1950-2025 archive.
-    for year in missing_years[:10]:
+    # Calendar jobs are tiny relative to session timing imports. Queue the
+    # complete missing range so the worker can populate every season without
+    # waiting for another scheduler tick, and so they remain ahead of the
+    # slower race-detail work.
+    for year in missing_years:
         queue_job(
             database, "season", f"season:{year}", {"season": year}, priority=30,
         )

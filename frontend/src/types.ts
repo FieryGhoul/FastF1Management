@@ -20,6 +20,7 @@ export type RaceEvent = {
   official_name?: string;
   country: string;
   location: string;
+  circuit_slug?: string;
   event_date: string | null;
   format?: string;
   f1_api_support: boolean;
@@ -38,7 +39,12 @@ export type Circuit = {
   lap_record?: string;
   first_grand_prix?: number;
   circuit_type?: string;
+  corner_count?: number;
+  direction?: string;
   source_url?: string;
+  event_count?: number;
+  session_count?: number;
+  events?: RaceEvent[];
   map_data?: {
     points?: TrackPoint[];
     corners?: TrackPoint[];

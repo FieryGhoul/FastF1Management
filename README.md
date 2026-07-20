@@ -17,7 +17,15 @@ The API process never calls FastF1 or Jolpica. It returns data already stored in
 
 MongoDB collections cover seasons, events, sessions, drivers, constructors, circuits, standings, results, laps, strategies, weather, race-control messages, per-lap telemetry, derived artifacts, dataset freshness, ingestion jobs, admin users and admin sessions.
 
-Telemetry is stored as one document per driver lap. Browser responses select the requested lap, downsample each trace to at most 1,500 points and calculate two-driver delta from stored samples. Canonical circuit maps are stored once on the circuit and reused for historical sessions that do not have position data.
+Telemetry is stored as one document per driver lap with three losslessly
+compressed streams: the merged trace used by charts, original car data and
+original position data. Merged `Distance` and `RelativeDistance` are normalized
+per lap so every comparison starts at zero, while both raw streams stay
+untouched. Browser responses select the requested lap, downsample
+each trace to at most 1,500 points and calculate two-driver delta from stored
+samples. Use `stream=merged`, `stream=car` or `stream=position` on the telemetry
+API to select a source stream. Canonical circuit maps are stored once on the
+circuit and reused for historical sessions that do not have position data.
 
 ## Run locally
 
@@ -76,7 +84,12 @@ Copy `.env.example` to `.env`, replace the passwords, then run:
 docker compose up --build
 ```
 
-Open `http://localhost:8080`. The stack contains MongoDB, API, worker, scheduler and frontend services, with persistent `mongo_data` and `fastf1_cache` volumes.
+Open `http://localhost:8080`. The stack contains MongoDB, API, a resumable
+coordinated 2000–2026 archive and 2018–2026 raw-timing loaders, worker,
+scheduler and frontend services, with
+persistent `mongo_data` and `fastf1_cache` volumes. On a new database, the
+archive loader must pass its deep completion audit before Compose starts the
+normal worker and scheduler.
 
 ## Scheduler policy
 
@@ -87,6 +100,61 @@ Open `http://localhost:8080`. The stack contains MongoDB, API, worker, scheduler
 - Failed jobs retry twice with exponential delay before becoming operator-visible failures.
 - Historical season backfill is controlled by `HISTORICAL_BACKFILL_ENABLED` or the Operations page.
 - Telemetry backfill is controlled by `TELEMETRY_BACKFILL_ENABLED` because a full 2018-present archive is large and slow.
+
+For an operator-requested, resumable archive load that should run independently
+of the normal queue, stop the worker and scheduler and run:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m app.backfill --start 2000 --end 2026 --until-complete
+```
+
+In a second terminal, start the independent FastF1 timing and telemetry loader.
+The archive loader coordinates with it and will not process the same modern
+sessions concurrently:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m app.timing_backfill --start 2018 --end 2026 --until-complete
+```
+
+This stores schedules, participants, round-by-round standings, published
+classifications, historical race laps and available pit stops for 2000 onward.
+FastF1 car/position streams, weather, race control and full session timing are
+stored for completed sessions from 2018 onward, which is the raw timing-data
+boundary. Progress and retryable failures are checkpointed in MongoDB so the
+command can be safely rerun. The dedicated timing runner removes only a
+session's exact FastF1 staging-cache directory after its schema-versioned raw
+streams have been verified in MongoDB; this keeps the complete archive from
+duplicating tens of gigabytes on disk.
+
+For historical timing, the archive command automatically downloads Jolpica's
+official free delayed CSV database dump, verifies its published SHA-256 hash,
+and builds a local SQLite index under `.cache/jolpica-dump`. This avoids the
+public API's 100-row pagination limit and stores every published lap and pit
+stop. If the dump is temporarily unavailable, complete paginated API fetching
+remains available as a fallback. The Docker cache volume covers all of
+`/cache`, so both the FastF1 cache and verified Jolpica dump survive container
+restarts.
+
+To prepare or inspect that source explicitly:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m app.jolpica_dump --download
+```
+
+Missing pre-2018 position outlines are filled from the MIT-licensed
+`bacinger/f1-circuits` GeoJSON and F1DB SVG catalogs. Verify full database
+coverage and normalized numeric formatting with:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.audit_archive --start 2000 --end 2026 --deep
+```
+
+Circuit outlines use the MIT-licensed `bacinger/f1-circuits` and `f1db/f1db`
+catalogs. Full circuit metadata (length, turns, type, direction and layouts) is
+stored from F1DB alongside each canonical map.
 
 FastF1 does not provide supported raw real-time analysis. The Live interface reports scheduled, in-progress and awaiting-data states honestly and displays detailed data only after it has been stored.
 

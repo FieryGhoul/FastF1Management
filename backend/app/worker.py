@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from .config import get_settings
 from .fastf1_adapter import FastF1Adapter
 from .ingestion import persist_session_bundle, persist_telemetry, persist_track, sync_circuits, sync_season, sync_standings
-from .mongo import claim_job, database, init_mongo, queue_job, utcnow
+from .mongo import claim_job, database, init_mongo, queue_job, recover_stale_jobs, utcnow
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -87,8 +87,12 @@ def process_job(adapter: FastF1Adapter, job: dict) -> None:
 
 def run_forever() -> None:
     init_mongo()
+    recovered = recover_stale_jobs(database)
     adapter = FastF1Adapter(settings.fastf1_cache)
-    logger.info(json.dumps({"event": "worker.started", "database": settings.mongodb_database}))
+    logger.info(json.dumps({
+        "event": "worker.started", "database": settings.mongodb_database,
+        "recovered_stale_jobs": recovered,
+    }))
     while True:
         job = claim_job(database)
         if job:

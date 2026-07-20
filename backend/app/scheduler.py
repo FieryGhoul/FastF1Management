@@ -49,6 +49,15 @@ def current_session_due(session: dict, now: datetime) -> bool:
 
 
 def schedule_historical_backfill(counts: dict[str, int]) -> None:
+    # The dedicated archive runner owns historical work while active.  Avoid
+    # duplicate queue traffic and concurrent FastF1 cache writes from the
+    # normal scheduler/worker pair.
+    if database.sync_controls.find_one({
+        "_id": {"$regex": "^archive_backfill:"},
+        "active": True,
+        "updated_at": {"$gte": utcnow() - timedelta(minutes=30)},
+    }):
+        return
     control = database.sync_controls.find_one({"_id": "historical_backfill", "active": True})
     enabled = settings.historical_backfill_enabled or bool(control)
     if not enabled:

@@ -13,9 +13,10 @@ from pymongo.database import Database
 
 from .circuit_matching import circuit_match_score, country_variants
 from .config import get_settings
+from .contracts import artifact_key
 from .mongo import database, get_db, init_mongo, public_document, queue_job, utcnow
 from .security import COOKIE_NAME, authenticate, create_session, ensure_admin, get_admin, require_csrf
-from .serialization import telemetry_points
+from .serialization import TELEMETRY_SCHEMA_VERSION, telemetry_points
 
 
 settings = get_settings()
@@ -49,9 +50,36 @@ def parse_datetime(value: Any) -> datetime | None:
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
-def artifact_id(session_id: str, kind: str, options: dict[str, Any]) -> str:
-    suffix = hashlib.sha1(repr(sorted(options.items())).encode(), usedforsecurity=False).hexdigest()[:12]
-    return f"v3:{session_id}:{kind}:{suffix}"
+def _recent_session_rate(completions: list[dict[str, Any]]) -> tuple[float | None, int]:
+    """Estimate active ingestion throughput without counting idle pauses.
+
+    Completion rows arrive newest-first.  A development restart, machine
+    sleep, or a deliberate pause should not turn a healthy session rate into
+    a multi-day ETA, so intervals far above the recent median are excluded.
+    The ten-minute floor still retains legitimately slow race sessions.
+    """
+    # Six completions roughly cover one Formula 1 event's practice,
+    # qualifying/sprint and race mix.  Keeping the window event-sized makes
+    # the displayed ETA respond to real ingestion optimizations without being
+    # dominated by sessions completed under an older code path.
+    timestamps = [
+        row.get("last_synced_at")
+        for row in completions
+        if row.get("last_synced_at") is not None
+    ][:6]
+    intervals = [
+        (timestamps[index] - timestamps[index + 1]).total_seconds()
+        for index in range(len(timestamps) - 1)
+    ]
+    intervals = [interval for interval in intervals if interval > 0]
+    if not intervals:
+        return None, len(timestamps)
+    cutoff = max(600.0, float(np.median(intervals)) * 5)
+    active_intervals = [interval for interval in intervals if interval <= cutoff]
+    if not active_intervals:
+        return None, len(timestamps)
+    rate = round(len(active_intervals) * 3600 / sum(active_intervals), 2)
+    return rate, len(active_intervals) + 1
 
 
 def session_state(db: Database, session_id: str) -> dict[str, Any] | None:
@@ -228,17 +256,32 @@ def constructor(constructor_id: str, season: int = Query(default_factory=lambda:
 
 
 @app.get("/api/v1/circuits")
-def circuits(season: int | None = None, db: Database = Depends(get_db)) -> dict:
-    rows = [public_document(row) for row in db.circuits.find().sort("name", ASCENDING)]
+def circuits(
+    season: int | None = None,
+    include_maps: bool = False,
+    db: Database = Depends(get_db),
+) -> dict:
+    projection = None if include_maps else {"map_data": 0}
+    rows = [public_document(row) for row in db.circuits.find({}, projection).sort("name", ASCENDING)]
     return {"data": rows, "source": "MongoDB / FastF1 Jolpica", "availability": "available" if rows else "awaiting_data"}
 
 
 @app.get("/api/v1/circuits/{slug}")
 def circuit(slug: str, db: Database = Depends(get_db)) -> dict:
-    row = db.circuits.find_one({"_id": slug})
+    row = db.circuits.find_one({"_id": slug}, {"map_data": 0})
     if not row:
         raise HTTPException(404, "Circuit not found in MongoDB")
-    return {"data": public_document(row), "availability": "available", "source": "MongoDB"}
+    events = [
+        public_document(event)
+        for event in db.events.find({"circuit_slug": slug}).sort([
+            ("season", DESCENDING), ("round", DESCENDING),
+        ])
+    ]
+    data = public_document(row)
+    data["events"] = events
+    data["event_count"] = len(events)
+    data["session_count"] = sum(len(event.get("sessions", [])) for event in events)
+    return {"data": data, "availability": "available", "source": "MongoDB"}
 
 
 @app.get("/api/v1/circuits/{slug}/map")
@@ -247,7 +290,13 @@ def circuit_map(slug: str, db: Database = Depends(get_db)) -> dict:
     if not row:
         raise HTTPException(404, "Circuit not found in MongoDB")
     if row.get("map_data"):
-        return {"availability": "available", "data": row["map_data"], "source": "MongoDB / FastF1 position data", "reference_session": row.get("map_reference_session")}
+        source = row.get("map_source_attribution") or "FastF1 position data"
+        return {
+            "availability": "available", "data": row["map_data"],
+            "source": f"MongoDB / {source}",
+            "source_url": row.get("map_source_url"),
+            "reference_session": row.get("map_reference_session"),
+        }
     reference = find_map_reference_session(db, row)
     if not reference:
         return {"availability": "unavailable", "unavailable_reason": "No supported completed reference session is available for this circuit.", "data": None, "source": "MongoDB"}
@@ -273,12 +322,12 @@ def stored_session_payload(db: Database, session_id: str, kind: str) -> dict[str
     state = session_state(db, session_id)
     if state:
         return state
+    artifact = db.artifacts.find_one({"_id": artifact_key(session_id, kind, {})})
+    if artifact:
+        return artifact["payload"]
     year = int(session_id.split("-", 1)[0])
     if year < 2018 and kind not in {"summary", "results", "track"}:
         return {"availability": "unavailable", "unavailable_reason": "Detailed timing data is available from 2018 onward.", "data": [], "source": "MongoDB"}
-    artifact = db.artifacts.find_one({"_id": artifact_id(session_id, kind, {})})
-    if artifact:
-        return artifact["payload"]
     if kind == "track":
         session = db.sessions.find_one({"_id": session_id})
         circuit_row = find_circuit(db, session) if session else None
@@ -288,33 +337,86 @@ def stored_session_payload(db: Database, session_id: str, kind: str) -> dict[str
 
 
 @app.get("/api/v1/sessions/{session_id}/telemetry")
-def telemetry(session_id: str, drivers: str = "", laps: str = "fastest", channels: str = "Speed,RPM,Throttle,Brake,nGear,DRS", db: Database = Depends(get_db)) -> dict:
+def telemetry(
+    session_id: str,
+    drivers: str = "",
+    laps: str = Query(default="fastest", max_length=16),
+    channels: str = "Speed,RPM,Throttle,Brake,nGear,DRS",
+    stream: Literal["merged", "car", "position"] = "merged",
+    db: Database = Depends(get_db),
+) -> dict:
     state = session_state(db, session_id)
     if state:
         return state
     if int(session_id.split("-", 1)[0]) < 2018:
         return {"availability": "unavailable", "unavailable_reason": "Telemetry is available from 2018 onward.", "data": None, "source": "MongoDB"}
+    telemetry_state = db.dataset_status.find_one({
+        "subject": session_id, "dataset": "telemetry",
+    })
+    if not telemetry_state:
+        return {
+            "availability": "awaiting_data",
+            "unavailable_reason": "Telemetry ingestion is not complete for this session.",
+            "data": None,
+            "source": "MongoDB",
+        }
+    if telemetry_state.get("schema_version") != TELEMETRY_SCHEMA_VERSION:
+        return {
+            "availability": "awaiting_data",
+            "unavailable_reason": "Telemetry is being upgraded to the complete raw-stream schema.",
+            "data": None,
+            "source": "MongoDB",
+        }
+    if telemetry_state.get("availability") != "available":
+        return {
+            "availability": telemetry_state.get("availability", "unavailable"),
+            "unavailable_reason": telemetry_state.get("unavailable_reason"),
+            "data": None,
+            "source": telemetry_state.get("source", "MongoDB"),
+            "updated_at": telemetry_state.get("updated_at"),
+        }
+    lap_selection = laps.strip().lower()
+    selected_lap = None
+    if lap_selection != "fastest":
+        try:
+            selected_lap = int(lap_selection)
+        except ValueError as exc:
+            raise HTTPException(422, "Lap must be 'fastest' or a positive number") from exc
+        if selected_lap < 1:
+            raise HTTPException(422, "Lap must be 'fastest' or a positive number")
     requested_drivers = [value.strip().upper() for value in drivers.split(",") if value.strip()][:2]
     if not requested_drivers:
         fastest = db.telemetry_laps.find_one({"session_id": session_id, "lap_time": {"$ne": None}}, sort=[("lap_time", ASCENDING)])
         requested_drivers = [fastest["driver"]] if fastest else []
-    allowed = [value.strip() for value in channels.split(",") if value.strip() in {"Speed", "RPM", "Throttle", "Brake", "nGear", "DRS"}]
+    requested_channels = [
+        value.strip() for value in channels.split(",")
+        if value.strip() and len(value.strip()) <= 64
+    ][:24]
+    point_stream = None if stream == "merged" else stream
     traces = []
+    available_channels: set[str] = set()
     for code in requested_drivers:
         query = {"session_id": session_id, "driver": code}
         document = (
             db.telemetry_laps.find_one(query, sort=[("lap_time", ASCENDING)])
-            if laps == "fastest" else db.telemetry_laps.find_one({**query, "lap": int(laps)})
+            if selected_lap is None
+            else db.telemetry_laps.find_one({**query, "lap": selected_lap})
         )
         if not document:
             continue
-        points = telemetry_points(document)
+        points = telemetry_points(document, point_stream)
+        for point in points:
+            available_channels.update(point.keys())
         stride = max(1, int(np.ceil(len(points) / 1500)))
         selected = []
         for point in points[::stride]:
-            selected.append({key: point.get(key) for key in ["Distance", "Time", "X", "Y", *allowed] if key in point})
+            keys = list(dict.fromkeys([
+                "Distance", "Time", "SessionTime", "X", "Y", "Z",
+                *requested_channels,
+            ]))
+            selected.append({key: point.get(key) for key in keys if key in point})
         traces.append({"driver": code, "lap": document.get("lap"), "lap_time": document.get("lap_time"), "points": selected})
-    if len(traces) == 2:
+    if stream == "merged" and len(traces) == 2:
         reference = [(point.get("Distance"), point.get("Time")) for point in traces[0]["points"] if point.get("Distance") is not None and point.get("Time") is not None]
         if reference:
             ref_distance = np.array([item[0] for item in reference])
@@ -323,8 +425,32 @@ def telemetry(session_id: str, drivers: str = "", laps: str = "fastest", channel
                 if point.get("Distance") is not None and point.get("Time") is not None:
                     point["Delta"] = point["Time"] - float(np.interp(point["Distance"], ref_distance, ref_time))
     if not traces:
-        return {"availability": "awaiting_data", "unavailable_reason": "Telemetry has not been ingested for this selection.", "data": None, "source": "MongoDB"}
-    return {"availability": "available", "unavailable_reason": None, "data": {"channels": [*allowed, "Delta"] if len(traces) == 2 else allowed, "traces": traces}, "source": "MongoDB", "updated_at": utcnow()}
+        return {
+            "availability": "unavailable",
+            "unavailable_reason": (
+                "No stored telemetry matches the selected driver and lap. "
+                "Choose another driver, lap number, or the fastest-lap default."
+            ),
+            "data": None,
+            "source": "MongoDB",
+        }
+    returned_channels = [
+        channel for channel in requested_channels if channel in available_channels
+    ]
+    if stream == "merged" and len(traces) == 2:
+        returned_channels.append("Delta")
+    return {
+        "availability": "available",
+        "unavailable_reason": None,
+        "data": {
+            "stream": stream,
+            "channels": returned_channels,
+            "available_channels": sorted(available_channels),
+            "traces": traces,
+        },
+        "source": "MongoDB",
+        "updated_at": utcnow(),
+    }
 
 
 @app.get("/api/v1/sessions/{session_id}/{kind}")
@@ -353,8 +479,17 @@ async def updates(websocket: WebSocket):
                     event_name = "sync.completed" if row["status"] == "completed" else "sync.failed" if row["status"] == "failed" else "sync.progress"
                     await websocket.send_json({"event": event_name, "job_id": row["_id"], "status": row["status"], "progress": row["progress"]})
                     seen[row["_id"]] = stamp
-            await asyncio.sleep(1)
-    except WebSocketDisconnect:
+            # A client normally sends nothing on this socket.  Still wait for
+            # an ASGI disconnect event so Uvicorn can close the connection
+            # immediately during a development reload instead of hanging in
+            # "Waiting for background tasks to complete" indefinitely.
+            try:
+                message = await asyncio.wait_for(websocket.receive(), timeout=1)
+                if message["type"] == "websocket.disconnect":
+                    return
+            except TimeoutError:
+                pass
+    except (WebSocketDisconnect, RuntimeError):
         return
 
 
@@ -412,6 +547,99 @@ def cache_info() -> dict:
     path = Path(settings.fastf1_cache)
     size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file()) if path.exists() else 0
     return {"path": str(path.resolve()), "size_bytes": size}
+
+
+@app.get("/api/v1/admin/archive", dependencies=[Depends(get_admin)])
+def archive_info(db: Database = Depends(get_db)) -> dict:
+    control = db.sync_controls.find_one({"_id": "archive_backfill:2000:2026"}) or {}
+    timing_control = db.sync_controls.find_one({"_id": "timing_backfill:2018:2026"}) or {}
+    updated_at = control.get("updated_at")
+    timing_updated_at = timing_control.get("updated_at")
+    active = bool(
+        control.get("active")
+        and updated_at
+        and updated_at >= utcnow() - timedelta(minutes=30)
+    )
+    timing_active = bool(
+        timing_control.get("active")
+        and timing_updated_at
+        and timing_updated_at >= utcnow() - timedelta(minutes=30)
+    )
+    verified_telemetry_sessions = db.dataset_status.distinct("subject", {
+        "dataset": "telemetry",
+        "availability": "available",
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+    })
+    verified_telemetry_scope = {
+        "session_id": {"$in": verified_telemetry_sessions},
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+    }
+    timing_position = int(timing_control.get("position", 0))
+    timing_total = int(timing_control.get("total", 0))
+    recent_completions = list(db.dataset_status.find(
+        {
+            "dataset": "telemetry",
+            "availability": "available",
+            "schema_version": TELEMETRY_SCHEMA_VERSION,
+            "last_synced_at": {"$ne": None},
+        },
+        {"last_synced_at": 1},
+    ).sort("last_synced_at", DESCENDING).limit(20))
+    recent_sessions_per_hour, rate_sample_size = _recent_session_rate(
+        recent_completions,
+    )
+    estimated_seconds_remaining = None
+    if recent_sessions_per_hour:
+        remaining = max(timing_total - timing_position, 0)
+        estimated_seconds_remaining = int(
+            remaining * 3600 / recent_sessions_per_hour,
+        )
+    return {
+        "active": active,
+        "phase": "stalled" if control.get("active") and not active else control.get("phase", "not_started"),
+        "subject": control.get("subject"),
+        "position": control.get("position", 0),
+        "total": control.get("total", 0),
+        "counts": control.get("counts", {}),
+        "updated_at": updated_at,
+        "completed_at": control.get("completed_at"),
+        "failures": db.backfill_failures.count_documents({"run": "archive_backfill:2000:2026"}),
+        "timing": {
+            "active": timing_active,
+            "phase": (
+                "stalled"
+                if timing_control.get("active") and not timing_active
+                else timing_control.get("phase", "not_started")
+            ),
+            "subject": timing_control.get("subject"),
+            "position": timing_position,
+            "total": timing_total,
+            "counts": timing_control.get("counts", {}),
+            "updated_at": timing_updated_at,
+            "completed_at": timing_control.get("completed_at"),
+            "failures": db.backfill_failures.count_documents({"run": "timing_backfill:2018:2026"}),
+            "recent_sessions_per_hour": recent_sessions_per_hour,
+            "estimated_seconds_remaining": estimated_seconds_remaining,
+            "rate_sample_size": rate_sample_size,
+        },
+        "coverage": {
+            "seasons": db.seasons.count_documents({"_id": {"$gte": 2000, "$lte": 2026}}),
+            "maps": db.circuits.count_documents({"map_data": {"$ne": None}}),
+            "circuits": db.circuits.count_documents({}),
+            "telemetry_sessions": len(verified_telemetry_sessions),
+            "telemetry_laps": db.telemetry_laps.count_documents(
+                verified_telemetry_scope,
+            ),
+            "raw_stream_laps": db.telemetry_laps.count_documents({
+                **verified_telemetry_scope,
+                "car_points_encoding": {"$exists": True},
+                "position_points_encoding": {"$exists": True},
+            }),
+            "outdated_telemetry_laps": db.telemetry_laps.count_documents({
+                "schema_version": {"$ne": TELEMETRY_SCHEMA_VERSION},
+            }),
+        },
+    }
 
 
 @app.get("/api/v1/admin/jobs", dependencies=[Depends(get_admin)])

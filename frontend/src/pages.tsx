@@ -22,7 +22,7 @@ import {
   Search,
   Wrench,
 } from "lucide-react";
-import { api, duration, localDate } from "./api";
+import { api, duration, formatValue, localDate } from "./api";
 import {
   DataTable,
   Empty,
@@ -40,6 +40,15 @@ import type { ApiEnvelope, Circuit, Job, LiveState, RaceEvent } from "./types";
 const TelemetryChart = lazy(() => import("./TelemetryChart"));
 
 const currentYear = new Date().getFullYear();
+
+function compactEta(seconds?: number | null) {
+  if (seconds == null || !Number.isFinite(seconds)) return "Calculating";
+  if (seconds <= 0) return "Complete";
+  const hours = Math.ceil(seconds / 3600);
+  if (hours < 24) return `About ${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `About ${days}d ${hours % 24}h`;
+}
 
 function useCalendar(year: number) {
   return useQuery({
@@ -76,19 +85,22 @@ export function HomePage() {
   const nextCircuit = circuits.data?.data.find((circuit) => {
     const location = next?.location?.toLowerCase();
     return Boolean(
-      location &&
-        (circuit.locality?.toLowerCase() === location ||
-          circuit.name.toLowerCase().includes(location)),
+      (next?.circuit_slug && circuit.slug === next.circuit_slug) ||
+        (location &&
+          (circuit.locality?.toLowerCase() === location ||
+            circuit.name.toLowerCase().includes(location))),
     );
   });
   const homeMap = useQuery({
     queryKey: ["circuit-map", nextCircuit?.slug],
-    queryFn: () => api<any>(`/circuits/${nextCircuit!.slug}/map`),
-    enabled: Boolean(nextCircuit && !nextCircuit.map_data),
-    refetchInterval: (result) =>
-      result.state.data?.availability === "awaiting_data" ? 1000 : false,
+    queryFn: () =>
+      api<{
+        availability: string;
+        data: NonNullable<Circuit["map_data"]>;
+      }>(`/circuits/${nextCircuit!.slug}/map`),
+    enabled: Boolean(nextCircuit?.slug),
   });
-  const homeMapData = nextCircuit?.map_data ?? homeMap.data?.data;
+  const homeMapData = homeMap.data?.data;
   const measuredDistance = (homeMapData?.points ?? []).reduce(
     (maximum: number, point: { Distance?: number }) =>
       Math.max(maximum, point.Distance ?? 0),
@@ -104,11 +116,12 @@ export function HomePage() {
         session.starts_at && new Date(session.starts_at).getTime() > now,
     );
   const raceSession = next?.sessions.find((session) => session.code === "R");
-  const cornerCount = new Set(
+  const positionedCornerCount = new Set(
     (homeMapData?.corners ?? [])
       .map((corner: { Number?: number }) => corner.Number)
       .filter((number: number | undefined) => number != null),
   ).size;
+  const cornerCount = positionedCornerCount || nextCircuit?.corner_count || 0;
   if (error)
     return (
       <div className="page">
@@ -146,6 +159,13 @@ export function HomePage() {
             points={homeMapData?.points}
             corners={homeMapData?.corners}
             rotation={homeMapData?.rotation}
+            emptyMessage={
+              circuits.error || homeMap.error
+                ? "The circuit service did not respond. Refresh to retry."
+                : circuits.isFetching || homeMap.isFetching
+                  ? "Loading the stored FastF1 circuit outline."
+                  : "No stored outline is available for this circuit yet."
+            }
           />
           {next && nextCircuit && (
             <div className="hero-track-details">
@@ -396,6 +416,12 @@ export function CalendarPage() {
       />
       {query.error ? (
         <ErrorState error={query.error} />
+      ) : query.isLoading ? (
+        <Empty
+          loading
+          title="Loading circuit atlas"
+          copy="Reading every stored circuit outline."
+        />
       ) : (
         <div className="calendar-list">
           {events.map((e) => (
@@ -423,6 +449,12 @@ export function EventPage() {
     queryFn: () => api<ApiEnvelope<RaceEvent>>(`/events/${year}/${round}`),
   });
   const event = query.data?.data;
+  const eventMap = useQuery({
+    queryKey: ["circuit-map", event?.circuit_slug],
+    queryFn: () => api<any>(`/circuits/${event!.circuit_slug}/map`),
+    enabled: Boolean(event?.circuit_slug),
+  });
+  const eventMapData = eventMap.data?.data;
   if (query.error)
     return (
       <div className="page">
@@ -439,7 +471,29 @@ export function EventPage() {
             copy={`${event.location} · ${event.format?.replaceAll("_", " ")}`}
           />
           <div className="event-detail">
-            <TrackMap label={event.location} />
+            <div>
+              <TrackMap
+                label={event.location}
+                points={eventMapData?.points}
+                corners={eventMapData?.corners}
+                rotation={eventMapData?.rotation}
+                emptyMessage={
+                  eventMap.error
+                    ? "The stored circuit outline could not be loaded."
+                    : eventMap.isFetching
+                      ? "Loading the stored circuit outline."
+                      : "No canonical circuit map is linked to this event."
+                }
+              />
+              {event.circuit_slug && (
+                <Link
+                  className="circuit-map-link"
+                  to={`/circuits/${event.circuit_slug}`}
+                >
+                  Open circuit details <ArrowRight />
+                </Link>
+              )}
+            </div>
             <div className="session-list">
               <h2>Weekend sessions</h2>
               {event.sessions.map((s) => (
@@ -468,7 +522,8 @@ export function EventPage() {
 
 export function StandingsPage() {
   const [year, setYear] = useState(currentYear),
-    [kind, setKind] = useState("drivers");
+    [kind, setKind] = useState("drivers"),
+    [showAllFields, setShowAllFields] = useState(false);
   const query = useQuery({
     queryKey: ["standings", year, kind],
     queryFn: () =>
@@ -515,7 +570,30 @@ export function StandingsPage() {
           copy="Reading the championship table."
         />
       ) : (
-        <DataTable columns={drivers} rows={query.data?.data ?? []} />
+        <div className="data-view">
+          <div className="data-view-toolbar">
+            <span>
+              {showAllFields
+                ? `Showing every stored standings field (${allDataColumns(query.data?.data ?? []).length})`
+                : "Focused championship view"}
+            </span>
+            <button
+              type="button"
+              className="button ghost field-toggle"
+              onClick={() => setShowAllFields((current) => !current)}
+            >
+              {showAllFields ? "Focused columns" : "All stored fields"}
+            </button>
+          </div>
+          <DataTable
+            columns={
+              showAllFields
+                ? allDataColumns(query.data?.data ?? [])
+                : drivers
+            }
+            rows={query.data?.data ?? []}
+          />
+        </div>
       )}
     </div>
   );
@@ -523,7 +601,8 @@ export function StandingsPage() {
 
 function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
   const [year, setYear] = useState(currentYear),
-    [search, setSearch] = useState("");
+    [search, setSearch] = useState(""),
+    [showAllFields, setShowAllFields] = useState(false);
   const query = useQuery({
     queryKey: [kind, year],
     queryFn: () =>
@@ -540,16 +619,27 @@ function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
         copy={`Browse every ${kind === "drivers" ? "driver" : "constructor"} entered in the selected season.`}
         aside={<YearSelect year={year} setYear={setYear} />}
       />
-      <label className="search">
-        <Search />
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={`Search ${kind}`}
-        />
-      </label>
+      <div className="directory-tools">
+        <label className="search">
+          <Search />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={`Search ${kind}`}
+          />
+        </label>
+        <button
+          type="button"
+          className="button ghost field-toggle"
+          onClick={() => setShowAllFields((current) => !current)}
+        >
+          {showAllFields ? "Card view" : "All stored fields"}
+        </button>
+      </div>
       {query.error ? (
         <ErrorState error={query.error} />
+      ) : showAllFields ? (
+        <DataTable columns={allDataColumns(rows)} rows={rows} />
       ) : (
         <div className="entity-grid">
           {rows.map((r, i) => (
@@ -598,8 +688,8 @@ export function TeamsPage() {
 export function CircuitsPage() {
   const [search, setSearch] = useState("");
   const query = useQuery({
-    queryKey: ["circuits"],
-    queryFn: () => api<ApiEnvelope<Circuit[]>>("/circuits"),
+    queryKey: ["circuits", "with-maps"],
+    queryFn: () => api<ApiEnvelope<Circuit[]>>("/circuits?include_maps=true"),
   });
   const rows = (query.data?.data ?? []).filter((c) =>
     `${c.name} ${c.country} ${c.locality}`
@@ -658,7 +748,7 @@ export function CircuitDetailPage() {
     queryFn: () => api<ApiEnvelope<Circuit>>(`/circuits/${slug}`),
     placeholderData: () => {
       const cached = queryClient
-        .getQueryData<ApiEnvelope<Circuit[]>>(["circuits"])
+        .getQueryData<ApiEnvelope<Circuit[]>>(["circuits", "with-maps"])
         ?.data.find((circuit) => circuit.slug === slug);
       return cached ? { data: cached } : undefined;
     },
@@ -672,6 +762,32 @@ export function CircuitDetailPage() {
       result.state.data?.availability === "awaiting_data" ? 1000 : false,
   });
   const mapData = c?.map_data ?? mapQuery.data?.data;
+  const circuitEvents = c?.events ?? [];
+  const circuitSessions = circuitEvents.flatMap((event) =>
+    event.sessions.map((session) => ({
+      id: session.id,
+      season: event.season,
+      round: event.round,
+      event: event.name,
+      session: session.name,
+      code: session.code,
+      date: localDate(session.starts_at),
+    })),
+  );
+  const circuitMetadata = c
+    ? [
+        Object.fromEntries(
+          Object.entries(c as unknown as Record<string, unknown>).filter(
+            ([key]) => !["map_data", "events"].includes(key),
+          ),
+        ),
+      ]
+    : [];
+  const mapCornerCount = new Set(
+    (mapData?.corners ?? [])
+      .map((corner: { Number?: number }) => corner.Number)
+      .filter((number: number | undefined) => number != null),
+  ).size || c?.corner_count || 0;
   if (query.error)
     return (
       <div className="page">
@@ -694,6 +810,7 @@ export function CircuitDetailPage() {
               "Corners & Marshal Points",
               "History",
               "Sessions",
+              "Metadata",
             ]}
             active={tab}
             onChange={setTab}
@@ -706,18 +823,23 @@ export function CircuitDetailPage() {
                     label="Length"
                     value={c.length_km ? `${c.length_km} km` : "—"}
                   />
-                  <Metric label="Race laps" value={c.race_laps ?? "—"} />
+                  <Metric label="Turns" value={c.corner_count ?? "—"} />
                   <Metric
                     label="First Grand Prix"
                     value={c.first_grand_prix ?? "—"}
                   />
-                  <Metric label="Lap record" value={c.lap_record ?? "—"} />
+                  <Metric label="Direction" value={c.direction ?? "—"} />
                 </div>
                 <TrackMap
                   label={c.name}
                   points={mapData?.points}
                   corners={mapData?.corners}
                   rotation={mapData?.rotation}
+                  emptyMessage={
+                    mapQuery.error
+                      ? "The stored outline could not be loaded."
+                      : "Loading the stored FastF1 circuit outline."
+                  }
                 />
               </>
             )}
@@ -727,6 +849,11 @@ export function CircuitDetailPage() {
                 points={mapData?.points}
                 corners={mapData?.corners}
                 rotation={mapData?.rotation}
+                emptyMessage={
+                  mapQuery.error
+                    ? "The stored outline could not be loaded."
+                    : "Loading the stored FastF1 circuit outline."
+                }
               />
             )}{" "}
             {tab === "Corners & Marshal Points" &&
@@ -735,7 +862,7 @@ export function CircuitDetailPage() {
                   <div className="metric-grid marker-metrics">
                     <Metric
                       label="Corners"
-                      value={mapData.corners?.length ?? 0}
+                      value={mapCornerCount}
                     />
                     <Metric
                       label="Marshal lights"
@@ -768,16 +895,66 @@ export function CircuitDetailPage() {
                 />
               ))}
             {tab === "History" && (
-              <Empty
-                title="History index not synced"
-                copy="Run a historical season sync from Operations to connect previous events at this circuit."
-              />
+              circuitEvents.length ? (
+                <>
+                  <div className="metric-grid marker-metrics">
+                    <Metric label="Grands Prix" value={c.event_count ?? circuitEvents.length} />
+                    <Metric
+                      label="First stored"
+                      value={circuitEvents.at(-1)?.season ?? "—"}
+                    />
+                    <Metric
+                      label="Latest stored"
+                      value={circuitEvents[0]?.season ?? "—"}
+                    />
+                    <Metric label="Sessions" value={c.session_count ?? circuitSessions.length} />
+                  </div>
+                  <div className="event-grid">
+                    {circuitEvents.map((event) => (
+                      <EventCard key={event.id} event={event} compact />
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <Empty
+                  title="No linked race weekends"
+                  copy="No stored event currently references this circuit."
+                />
+              )
             )}
             {tab === "Sessions" && (
-              <Empty
-                title="Choose from the calendar"
-                copy="Open a race weekend to browse every available session at this circuit."
-              />
+              circuitSessions.length ? (
+                <DataTable
+                  columns={[
+                    { key: "season", label: "Season" },
+                    { key: "round", label: "Round" },
+                    { key: "event", label: "Grand Prix" },
+                    { key: "session", label: "Session" },
+                    { key: "code", label: "Code" },
+                    { key: "date", label: "Date" },
+                  ]}
+                  rows={circuitSessions}
+                />
+              ) : (
+                <Empty
+                  title="No linked sessions"
+                  copy="No stored sessions currently reference this circuit."
+                />
+              )
+            )}
+            {tab === "Metadata" && (
+              <div className="data-view">
+                <div className="data-view-toolbar">
+                  <span>
+                    Complete circuit identity, coordinates, provenance, and
+                    catalog metadata
+                  </span>
+                </div>
+                <DataTable
+                  columns={allDataColumns(circuitMetadata)}
+                  rows={circuitMetadata}
+                />
+              </div>
             )}
           </section>
         </>
@@ -812,6 +989,27 @@ type LapRecord = {
   DeletedReason?: string;
 };
 
+function fieldLabel(key: string) {
+  return key
+    .replaceAll("_", " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function allDataColumns(rows: Record<string, unknown>[]) {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  rows.forEach((row) =>
+    Object.keys(row).forEach((key) => {
+      if (!seen.has(key)) {
+        seen.add(key);
+        keys.push(key);
+      }
+    }),
+  );
+  return keys.map((key) => ({ key, label: fieldLabel(key) }));
+}
+
 function LapAnalysis({ laps }: { laps: LapRecord[] }) {
   const drivers = useMemo(
     () =>
@@ -835,6 +1033,7 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
   const [driver, setDriver] = useState(fastestDriver ?? drivers[0] ?? "ALL");
   const [compound, setCompound] = useState("ALL");
   const [accurateOnly, setAccurateOnly] = useState(true);
+  const [showAllFields, setShowAllFields] = useState(false);
   useEffect(() => {
     if (driver !== "ALL" && !drivers.includes(driver))
       setDriver(fastestDriver ?? drivers[0] ?? "ALL");
@@ -924,6 +1123,13 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
           />
           Accurate laps only
         </label>
+        <button
+          type="button"
+          className="button ghost field-toggle"
+          onClick={() => setShowAllFields((current) => !current)}
+        >
+          {showAllFields ? "Focused columns" : `All ${allDataColumns(laps as unknown as Record<string, unknown>[]).length} fields`}
+        </button>
       </div>
       <div className="lap-summary">
         <Metric
@@ -962,6 +1168,14 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
           <TelemetryChart option={chartOption} height={360} />
         </Suspense>
       </div>
+      {showAllFields ? (
+        <DataTable
+          columns={allDataColumns(
+            filtered as unknown as Record<string, unknown>[],
+          )}
+          rows={filtered as unknown as Record<string, unknown>[]}
+        />
+      ) : (
       <div className="table-wrap lap-table">
         <table>
           <thead>
@@ -1026,58 +1240,83 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }
 
 function ResultsAnalysis({ rows }: { rows: Record<string, unknown>[] }) {
+  const [showAllFields, setShowAllFields] = useState(false);
+  const focusedColumns = [
+    {
+      key: "Position",
+      label: "Pos",
+      render: (row: Record<string, unknown>) => (
+        <b>{formatValue(row.Position, "Position")}</b>
+      ),
+    },
+    {
+      key: "Abbreviation",
+      label: "Driver",
+      render: (row: Record<string, unknown>) => (
+        <>
+          <strong>{formatValue(row.Abbreviation, "Abbreviation")}</strong>
+          <small className="table-subline">
+            {formatValue(row.FullName, "FullName")}
+          </small>
+        </>
+      ),
+    },
+    { key: "TeamName", label: "Team" },
+    { key: "GridPosition", label: "Grid" },
+    {
+      key: "Time",
+      label: "Time / Gap",
+      render: (row: Record<string, unknown>) =>
+        duration(row.Time as number | null),
+    },
+    {
+      key: "Q1",
+      label: "Q1",
+      render: (row: Record<string, unknown>) =>
+        duration(row.Q1 as number | null),
+    },
+    {
+      key: "Q2",
+      label: "Q2",
+      render: (row: Record<string, unknown>) =>
+        duration(row.Q2 as number | null),
+    },
+    {
+      key: "Q3",
+      label: "Q3",
+      render: (row: Record<string, unknown>) =>
+        duration(row.Q3 as number | null),
+    },
+    { key: "Points", label: "Points" },
+    { key: "Status", label: "Status" },
+  ];
   return (
-    <DataTable
-      columns={[
-        {
-          key: "Position",
-          label: "Pos",
-          render: (row) => <b>{String(row.Position ?? "—")}</b>,
-        },
-        {
-          key: "Abbreviation",
-          label: "Driver",
-          render: (row) => (
-            <>
-              <strong>{String(row.Abbreviation ?? "")}</strong>
-              <small className="table-subline">
-                {String(row.FullName ?? "")}
-              </small>
-            </>
-          ),
-        },
-        { key: "TeamName", label: "Team" },
-        { key: "GridPosition", label: "Grid" },
-        {
-          key: "Time",
-          label: "Time / Gap",
-          render: (row) => duration(row.Time as number | null),
-        },
-        {
-          key: "Q1",
-          label: "Q1",
-          render: (row) => duration(row.Q1 as number | null),
-        },
-        {
-          key: "Q2",
-          label: "Q2",
-          render: (row) => duration(row.Q2 as number | null),
-        },
-        {
-          key: "Q3",
-          label: "Q3",
-          render: (row) => duration(row.Q3 as number | null),
-        },
-        { key: "Points", label: "Points" },
-        { key: "Status", label: "Status" },
-      ]}
-      rows={rows}
-    />
+    <div className="data-view">
+      <div className="data-view-toolbar">
+        <span>
+          {showAllFields
+            ? `Showing every stored result field (${allDataColumns(rows).length})`
+            : "Focused classification view"}
+        </span>
+        <button
+          type="button"
+          className="button ghost field-toggle"
+          onClick={() => setShowAllFields((current) => !current)}
+        >
+          {showAllFields ? "Focused columns" : "All stored fields"}
+        </button>
+      </div>
+      <DataTable
+        columns={showAllFields ? allDataColumns(rows) : focusedColumns}
+        rows={rows}
+      />
+    </div>
   );
 }
 
@@ -1086,8 +1325,10 @@ export function SessionPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState(searchParams.get("tab") ?? "Overview"),
     [drivers, setDrivers] = useState(""),
+    [lapNumber, setLapNumber] = useState(""),
     [channels, setChannels] = useState("Speed,RPM,Throttle,Brake,nGear,DRS"),
-    [plotChannel, setPlotChannel] = useState("Speed");
+    [plotChannel, setPlotChannel] = useState("Speed"),
+    [stream, setStream] = useState<"merged" | "car" | "position">("merged");
   const kind =
     tab === "Overview"
       ? "summary"
@@ -1096,7 +1337,7 @@ export function SessionPage() {
         : tab.toLowerCase();
   const path =
     kind === "telemetry"
-      ? `/sessions/${sessionId}/telemetry?drivers=${encodeURIComponent(drivers)}&laps=fastest&channels=${encodeURIComponent(channels)}`
+      ? `/sessions/${sessionId}/telemetry?drivers=${encodeURIComponent(drivers)}&laps=${encodeURIComponent(lapNumber || "fastest")}&channels=${encodeURIComponent(channels)}&stream=${stream}`
       : `/sessions/${sessionId}/${kind}`;
   const summaryQuery = useQuery({
     queryKey: ["session-summary", sessionId],
@@ -1112,7 +1353,15 @@ export function SessionPage() {
       result.state.data?.availability === "awaiting_data" ? 1000 : false,
   });
   const detailQuery = useQuery({
-    queryKey: ["session", sessionId, kind, drivers, channels],
+    queryKey: [
+      "session",
+      sessionId,
+      kind,
+      drivers,
+      lapNumber,
+      channels,
+      stream,
+    ],
     queryFn: () => api<any>(path),
     enabled: kind !== "summary" && kind !== "track",
     refetchInterval: (result) =>
@@ -1134,6 +1383,24 @@ export function SessionPage() {
     "in_progress",
     "awaiting_data",
   ].includes(sessionState ?? "");
+  const chartChannels = useMemo(() => {
+    const traces = data?.traces ?? [];
+    return (data?.channels ?? []).filter((channel: string) =>
+      traces.some((trace: any) =>
+        trace.points?.some((point: any) => typeof point[channel] === "number"),
+      ),
+    );
+  }, [data]);
+  const activePlotChannel = chartChannels.includes(plotChannel)
+    ? plotChannel
+    : (chartChannels[0] ?? plotChannel);
+  const xChannel = useMemo(() => {
+    const points = (data?.traces ?? []).flatMap((trace: any) => trace.points ?? []);
+    if (points.some((point: any) => typeof point.Distance === "number"))
+      return "Distance";
+    if (points.some((point: any) => typeof point.Time === "number")) return "Time";
+    return "SessionTime";
+  }, [data]);
   const telemetryOption = useMemo(() => {
     const traces = data?.traces ?? [];
     return {
@@ -1141,25 +1408,34 @@ export function SessionPage() {
       tooltip: { trigger: "axis" },
       legend: { data: traces.map((t: any) => t.driver) },
       grid: { left: 58, right: 20, top: 40, bottom: 45 },
-      xAxis: { type: "value", name: "Distance m" },
+      xAxis: {
+        type: "value",
+        name: xChannel === "Distance" ? "Distance m" : `${xChannel} ms`,
+      },
       yAxis: {
         type: "value",
-        name: plotChannel === "Delta" ? "Delta ms" : plotChannel,
+        name:
+          activePlotChannel === "Delta" ? "Delta ms" : activePlotChannel,
       },
       series: traces
         .filter(
-          (_: any, index: number) => plotChannel !== "Delta" || index === 1,
+          (_: any, index: number) =>
+            activePlotChannel !== "Delta" || index === 1,
         )
         .map((t: any) => ({
           name: t.driver,
           type: "line",
           showSymbol: false,
           data: t.points
-            .filter((p: any) => p[plotChannel] != null)
-            .map((p: any) => [p.Distance, p[plotChannel]]),
+            .filter(
+              (p: any) =>
+                typeof p[xChannel] === "number" &&
+                typeof p[activePlotChannel] === "number",
+            )
+            .map((p: any) => [p[xChannel], p[activePlotChannel]]),
         })),
     };
-  }, [data, plotChannel]);
+  }, [activePlotChannel, data, xChannel]);
   if (payload?.status === "failed")
     return (
       <div className="page">
@@ -1239,24 +1515,69 @@ export function SessionPage() {
             />
           </label>
           <label>
-            Channels
+            Lap
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={lapNumber}
+              onChange={(event) =>
+                setLapNumber(event.target.value.replace(/\D/g, ""))
+              }
+              placeholder="Fastest"
+            />
+          </label>
+          <label>
+            Data stream
             <select
+              value={stream}
+              onChange={(event) => {
+                const next = event.target.value as
+                  | "merged"
+                  | "car"
+                  | "position";
+                setStream(next);
+                if (next === "position") {
+                  setChannels("X,Y,Z,Status");
+                  setPlotChannel("X");
+                } else {
+                  setChannels("Speed,RPM,Throttle,Brake,nGear,DRS");
+                  setPlotChannel("Speed");
+                }
+              }}
+            >
+              <option value="merged">Merged lap</option>
+              <option value="car">Raw car data</option>
+              <option value="position">Raw position data</option>
+            </select>
+          </label>
+          <label>
+            Channels
+            <input
+              list="telemetry-channel-presets"
               value={channels}
               onChange={(e) => setChannels(e.target.value)}
-            >
-              <option>Speed,RPM,Throttle,Brake,nGear,DRS</option>
-              <option>Speed,Throttle,Brake</option>
-              <option>Speed,RPM,nGear</option>
-            </select>
+              maxLength={512}
+              placeholder="Comma-separated channels"
+            />
+            <datalist id="telemetry-channel-presets">
+              <option value="Speed,RPM,Throttle,Brake,nGear,DRS" />
+              <option value="Speed,Throttle,Brake" />
+              <option value="Speed,RPM,nGear" />
+              <option value="X,Y,Z,Status" />
+              <option value="X,Y" />
+              <option value="Z,Status" />
+            </datalist>
           </label>
           <label>
             Chart
             <select
-              value={plotChannel}
+              value={activePlotChannel}
               onChange={(event) => setPlotChannel(event.target.value)}
             >
-              {(
-                data?.channels ?? [
+              {(chartChannels.length
+                ? chartChannels
+                : [
                   "Speed",
                   "RPM",
                   "Throttle",
@@ -1311,7 +1632,7 @@ export function SessionPage() {
                 key={t.driver}
                 label={t.driver}
                 value={duration(t.lap_time)}
-                detail={`Fastest lap ${t.lap}`}
+                detail={`${lapNumber ? "Selected" : "Fastest"} lap ${t.lap}`}
               />
             ))}
           </div>
@@ -1325,7 +1646,7 @@ export function SessionPage() {
                 <Metric
                   key={k}
                   label={k.replaceAll("_", " ")}
-                  value={Array.isArray(v) ? v.length : String(v ?? "â€”")}
+                  value={Array.isArray(v) ? v.length : formatValue(v, k)}
                 />
               ))}
           </div>
@@ -1334,6 +1655,11 @@ export function SessionPage() {
             points={trackQuery.data?.data?.points}
             corners={trackQuery.data?.data?.corners}
             rotation={trackQuery.data?.data?.rotation}
+            emptyMessage={
+              trackQuery.error
+                ? "The stored outline could not be loaded."
+                : "Loading the stored FastF1 circuit outline."
+            }
           />
         </div>
       ) : tab === "Track" && data ? (
@@ -1349,9 +1675,7 @@ export function SessionPage() {
         <ResultsAnalysis rows={data} />
       ) : Array.isArray(data) ? (
         <DataTable
-          columns={Object.keys(data[0] ?? {})
-            .slice(0, 8)
-            .map((k) => ({ key: k, label: k.replaceAll("_", " ") }))}
+          columns={allDataColumns(data)}
           rows={data}
         />
       ) : data ? (
@@ -1362,7 +1686,7 @@ export function SessionPage() {
               <Metric
                 key={k}
                 label={k.replaceAll("_", " ")}
-                value={Array.isArray(v) ? v.length : String(v ?? "—")}
+                value={Array.isArray(v) ? v.length : formatValue(v, k)}
               />
             ))}
         </div>
@@ -1399,6 +1723,41 @@ export function AdminPage() {
     enabled: !!me.data?.authenticated,
     refetchInterval: 5000,
   });
+  const archive = useQuery({
+    queryKey: ["admin-archive"],
+    queryFn: () =>
+      api<{
+        active: boolean;
+        phase: string;
+        subject?: string;
+        position: number;
+        total: number;
+        failures: number;
+        timing: {
+          active: boolean;
+          phase: string;
+          subject?: string;
+          position: number;
+          total: number;
+          counts: Record<string, number>;
+          failures: number;
+          recent_sessions_per_hour: number | null;
+          estimated_seconds_remaining: number | null;
+          rate_sample_size: number;
+        };
+        coverage: {
+          seasons: number;
+          maps: number;
+          circuits: number;
+          telemetry_sessions: number;
+          telemetry_laps: number;
+          raw_stream_laps: number;
+          outdated_telemetry_laps: number;
+        };
+      }>("/admin/archive"),
+    enabled: !!me.data?.authenticated,
+    refetchInterval: 5000,
+  });
   async function login(e: FormEvent) {
     e.preventDefault();
     try {
@@ -1420,7 +1779,7 @@ export function AdminPage() {
         : kind === "backfill" || kind === "full-backfill"
           ? {
               kind: "backfill",
-              start: 1950,
+              start: 2000,
               end: currentYear,
               include_telemetry: kind === "full-backfill",
             }
@@ -1432,6 +1791,13 @@ export function AdminPage() {
     });
     setMessage(`Queued ${result.job_id}`);
   }
+  const timingPosition = archive.data?.timing.position ?? 0;
+  const timingTotal = archive.data?.timing.total ?? 0;
+  const timingProgress = timingTotal
+    ? Math.min(100, (timingPosition / timingTotal) * 100)
+    : 0;
+  const timingRate = archive.data?.timing.recent_sessions_per_hour;
+  const timingEta = archive.data?.timing.estimated_seconds_remaining;
   return (
     <div className="page">
       <PageHeader
@@ -1482,7 +1848,7 @@ export function AdminPage() {
             <button onClick={() => sync("backfill")}>
               <Database />
               <b>Queue historical index</b>
-              <span>Schedules, rosters and standings from 1950</span>
+              <span>Schedules, rosters and standings from 2000</span>
             </button>
             <button onClick={() => sync("full-backfill")}>
               <Activity />
@@ -1510,6 +1876,111 @@ export function AdminPage() {
               {message}
             </div>
           )}
+          <section className="section">
+            <div className="section-title">
+              <div>
+                <span>MongoDB coverage</span>
+                <h2>Archive 2000–2026</h2>
+              </div>
+              <Status
+                kind={
+                  archive.data?.failures || archive.data?.timing?.failures
+                    ? "warn"
+                    : archive.data?.active || archive.data?.timing?.active
+                      ? "live"
+                      : "good"
+                }
+              >
+                {archive.data?.active || archive.data?.timing?.active
+                  ? "loading"
+                  : archive.data?.phase ?? "checking"}
+              </Status>
+            </div>
+            <div className="archive-progress">
+              <div>
+                <span>Modern timing scan</span>
+                <strong>
+                  {timingPosition.toLocaleString()} / {timingTotal.toLocaleString()} sessions
+                </strong>
+                <small>
+                  {timingTotal ? `${timingProgress.toFixed(1)}%` : "Preparing index"}
+                  {archive.data?.timing.subject
+                    ? ` · ${archive.data.timing.subject}`
+                    : ""}
+                  {timingRate ? ` · ${timingRate.toFixed(1)} sessions/hour` : ""}
+                  {timingEta != null ? ` · ${compactEta(timingEta)} remaining` : ""}
+                </small>
+              </div>
+              <div
+                className="archive-progress-track"
+                role="progressbar"
+                aria-label="Modern timing archive progress"
+                aria-valuemin={0}
+                aria-valuemax={timingTotal || 1}
+                aria-valuenow={timingPosition}
+              >
+                <i style={{ width: `${timingProgress}%` }} />
+              </div>
+            </div>
+            <div className="metric-grid archive-metrics">
+              <Metric label="Archive phase" value={archive.data?.phase ?? "—"} />
+              <Metric label="Archive item" value={archive.data?.subject ?? "—"} />
+              <Metric
+                label="Timing phase"
+                value={archive.data?.timing?.phase ?? "—"}
+              />
+              <Metric
+                label="Timing item"
+                value={archive.data?.timing?.subject ?? "—"}
+              />
+              <Metric
+                label="Seasons"
+                value={`${archive.data?.coverage.seasons ?? 0}/27`}
+              />
+              <Metric
+                label="Circuit maps"
+                value={`${archive.data?.coverage.maps ?? 0}/${archive.data?.coverage.circuits ?? 0}`}
+              />
+              <Metric
+                label="Telemetry sessions"
+                value={archive.data?.coverage.telemetry_sessions ?? 0}
+              />
+              <Metric
+                label="Telemetry laps"
+                value={archive.data?.coverage.telemetry_laps ?? 0}
+              />
+              <Metric
+                label="Raw stream laps"
+                value={archive.data?.coverage.raw_stream_laps ?? 0}
+              />
+              <Metric
+                label="Outdated laps"
+                value={archive.data?.coverage.outdated_telemetry_laps ?? 0}
+              />
+              <Metric
+                label="Failures"
+                value={(archive.data?.failures ?? 0) + (archive.data?.timing?.failures ?? 0)}
+              />
+              <Metric
+                label="Recent rate"
+                value={timingRate ? `${timingRate.toFixed(1)}/hour` : "Calculating"}
+                detail={
+                  archive.data?.timing.rate_sample_size
+                    ? `${archive.data.timing.rate_sample_size} verified sessions sampled`
+                    : undefined
+                }
+              />
+              <Metric
+                label="Estimated remaining"
+                value={compactEta(timingEta)}
+                detail="Rolling estimate from verified commits"
+              />
+              <Metric
+                label="Runners"
+                value={`${archive.data?.active ? "Archive active" : "Archive stopped"} · ${archive.data?.timing?.active ? "Timing active" : "Timing stopped"}`}
+              />
+            </div>
+          </section>
           <CircuitEditor csrf={csrf} setMessage={setMessage} />
           <section className="section">
             <div className="section-title">

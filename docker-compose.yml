@@ -34,7 +34,43 @@ services:
       timeout: 5s
       retries: 10
     volumes:
-      - fastf1_cache:/cache/fastf1
+      - fastf1_cache:/cache
+
+  archive:
+    build: ./backend
+    command:
+      - python
+      - -m
+      - app.backfill
+      - --start
+      - ${HISTORICAL_BACKFILL_START:-2000}
+      - --end
+      - "2026"
+      - --until-complete
+    environment: *backend-env
+    depends_on:
+      mongo:
+        condition: service_healthy
+    volumes:
+      - fastf1_cache:/cache
+
+  timing:
+    build: ./backend
+    command:
+      - python
+      - -m
+      - app.timing_backfill
+      - --start
+      - "2018"
+      - --end
+      - "2026"
+      - --until-complete
+    environment: *backend-env
+    depends_on:
+      mongo:
+        condition: service_healthy
+    volumes:
+      - fastf1_cache:/cache
 
   worker:
     build: ./backend
@@ -43,8 +79,12 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+      archive:
+        condition: service_completed_successfully
+      timing:
+        condition: service_completed_successfully
     volumes:
-      - fastf1_cache:/cache/fastf1
+      - fastf1_cache:/cache
 
   scheduler:
     build: ./backend
@@ -53,6 +93,10 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+      archive:
+        condition: service_completed_successfully
+      timing:
+        condition: service_completed_successfully
 
   web:
     build: ./frontend

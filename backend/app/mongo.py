@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Generator
 
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
@@ -50,12 +50,18 @@ def init_mongo() -> None:
     database.race_control_messages.create_index([("session_id", ASCENDING), ("Time", ASCENDING)])
     database.telemetry_laps.create_index([("session_id", ASCENDING), ("driver", ASCENDING), ("lap", ASCENDING)], unique=True)
     database.telemetry_laps.create_index([("session_id", ASCENDING), ("driver", ASCENDING), ("lap_time", ASCENDING)])
+    database.telemetry_laps.create_index([("schema_version", ASCENDING), ("session_id", ASCENDING)])
     database.artifacts.create_index([("session_id", ASCENDING), ("kind", ASCENDING)])
     database.jobs.create_index(
         [("status", ASCENDING), ("priority", DESCENDING), ("scheduled_for", ASCENDING), ("created_at", ASCENDING)]
     )
     database.jobs.create_index([("key", ASCENDING), ("created_at", DESCENDING)])
     database.dataset_status.create_index([("subject", ASCENDING), ("dataset", ASCENDING)], unique=True)
+    database.dataset_status.create_index([
+        ("dataset", ASCENDING),
+        ("availability", ASCENDING),
+        ("schema_version", ASCENDING),
+    ])
     database.admin_users.create_index("username", unique=True)
     database.admin_sessions.create_index("expires_at", expireAfterSeconds=0)
 
@@ -115,6 +121,22 @@ def claim_job(db: Database) -> dict[str, Any] | None:
     )
 
 
+def recover_stale_jobs(db: Database, *, older_than: timedelta = timedelta(minutes=15)) -> int:
+    """Return work abandoned by a terminated worker to the durable queue."""
+    now = utcnow()
+    result = db.jobs.update_many(
+        {"status": "running", "updated_at": {"$lt": now - older_than}},
+        {"$set": {
+            "status": "queued",
+            "progress": 0,
+            "scheduled_for": now,
+            "error": "Recovered after the previous worker stopped before completion.",
+            "updated_at": now,
+        }},
+    )
+    return result.modified_count
+
+
 def set_dataset_status(
     db: Database,
     subject: str,
@@ -124,19 +146,23 @@ def set_dataset_status(
     source: str,
     reason: str | None = None,
     checksum: str | None = None,
+    schema_version: int | None = None,
 ) -> None:
     now = utcnow()
+    fields = {
+        "subject": subject,
+        "dataset": dataset,
+        "availability": availability,
+        "unavailable_reason": reason,
+        "source": source,
+        "checksum": checksum,
+        "last_synced_at": now,
+        "updated_at": now,
+    }
+    if schema_version is not None:
+        fields["schema_version"] = schema_version
     db.dataset_status.update_one(
         {"subject": subject, "dataset": dataset},
-        {"$set": {
-            "subject": subject,
-            "dataset": dataset,
-            "availability": availability,
-            "unavailable_reason": reason,
-            "source": source,
-            "checksum": checksum,
-            "last_synced_at": now,
-            "updated_at": now,
-        }},
+        {"$set": fields},
         upsert=True,
     )

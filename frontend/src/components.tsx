@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { RaceEvent, TrackPoint } from "./types";
-import { localDate } from "./api";
+import { formatValue, localDate } from "./api";
 
 export function Layout({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState(
@@ -221,31 +221,43 @@ export function TrackMap({
   corners = [],
   rotation = 0,
   label,
+  emptyMessage,
 }: {
   points?: TrackPoint[];
   corners?: TrackPoint[];
   rotation?: number;
   label?: string;
+  emptyMessage?: string;
 }) {
   const geometry = useMemo(() => {
-    if (!points.length) return null;
+    const validPoints = points.filter(
+      (point) => Number.isFinite(point.X) && Number.isFinite(point.Y),
+    );
+    if (validPoints.length < 2) return null;
     const radians = (rotation * Math.PI) / 180;
     const rotate = (point: TrackPoint) => ({
       ...point,
       X: point.X * Math.cos(radians) + point.Y * Math.sin(radians),
       Y: -point.X * Math.sin(radians) + point.Y * Math.cos(radians),
     });
-    const trackPoints = points.map(rotate);
-    const cornerPoints = corners.map(rotate);
+    const trackPoints = validPoints.map(rotate);
+    const cornerPoints = corners
+      .filter((point) => Number.isFinite(point.X) && Number.isFinite(point.Y))
+      .map(rotate);
     const xs = trackPoints.map((p) => p.X),
       ys = trackPoints.map((p) => p.Y);
     const minX = Math.min(...xs),
       maxX = Math.max(...xs),
       minY = Math.min(...ys),
       maxY = Math.max(...ys);
+    const spanX = maxX - minX || 1;
+    const spanY = maxY - minY || 1;
+    const factor = Math.min(730 / spanX, 390 / spanY);
+    const offsetX = (800 - spanX * factor) / 2;
+    const offsetY = (460 - spanY * factor) / 2;
     const scale = (p: TrackPoint) => ({
-      x: 35 + ((p.X - minX) / (maxX - minX || 1)) * 730,
-      y: 35 + ((maxY - p.Y) / (maxY - minY || 1)) * 390,
+      x: offsetX + (p.X - minX) * factor,
+      y: offsetY + (maxY - p.Y) * factor,
     });
     return {
       line: trackPoints
@@ -255,6 +267,7 @@ export function TrackMap({
         })
         .join(" "),
       corners: cornerPoints.map((p) => ({ ...p, ...scale(p) })),
+      start: scale(trackPoints[0]),
     };
   }, [points, corners, rotation]);
   if (!geometry)
@@ -264,7 +277,10 @@ export function TrackMap({
         <div className="track-scan" aria-hidden>
           <MapPinned />
         </div>
-        <small>Generating the real outline from FastF1 position data.</small>
+        <small>
+          {emptyMessage ??
+            "Generating the real outline from FastF1 position data."}
+        </small>
       </div>
     );
   return (
@@ -275,6 +291,13 @@ export function TrackMap({
       aria-label={`${label ?? "Circuit"} track outline`}
     >
       <path d={geometry.line} />
+      <rect
+        className="start-finish"
+        x={geometry.start.x - 5}
+        y={geometry.start.y - 5}
+        width="10"
+        height="10"
+      />
       {geometry.corners.map((p, i) => (
         <g key={i}>
           <circle cx={p.x} cy={p.y} r="11" />
@@ -339,7 +362,7 @@ export function DataTable({
             <tr key={String(row.id ?? row.driverId ?? row.constructorId ?? i)}>
               {columns.map((c) => (
                 <td key={c.key}>
-                  {c.render ? c.render(row) : String(row[c.key] ?? "—")}
+                  {c.render ? c.render(row) : formatValue(row[c.key], c.key)}
                 </td>
               ))}
             </tr>

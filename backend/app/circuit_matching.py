@@ -6,7 +6,7 @@ from rapidfuzz import fuzz
 COUNTRY_GROUPS = (
     frozenset({"UK", "United Kingdom", "Great Britain"}),
     frozenset({"USA", "United States", "United States of America"}),
-    frozenset({"UAE", "United Arab Emirates"}),
+    frozenset({"UAE", "United Arab Emirates", "Abu Dhabi"}),
 )
 
 

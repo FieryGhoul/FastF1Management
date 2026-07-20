@@ -1,7 +1,7 @@
 from datetime import timedelta
 
-from app.mongo import claim_job, database, queue_job, utcnow
-from app.scheduler import current_session_due
+from app.mongo import claim_job, database, queue_job, recover_stale_jobs, utcnow
+from app.scheduler import current_session_due, schedule_historical_backfill
 
 
 def setup_function():
@@ -26,6 +26,20 @@ def test_existing_job_can_be_promoted_and_is_claimed_first():
     assert claim_job(database)["_id"] == queued["_id"]
 
 
+def test_stale_running_job_is_recovered_after_worker_restart():
+    job = queue_job(database, "season", "season:2025", {"season": 2025})
+    database.jobs.update_one(
+        {"_id": job["_id"]},
+        {"$set": {"status": "running", "updated_at": utcnow() - timedelta(hours=1)}},
+    )
+
+    assert recover_stale_jobs(database) == 1
+    recovered = database.jobs.find_one({"_id": job["_id"]})
+    assert recovered["status"] == "queued"
+    assert recovered["progress"] == 0
+    assert "previous worker stopped" in recovered["error"]
+
+
 def test_finalized_session_is_not_downloaded_forever():
     now = utcnow()
     session = {"_id": "2025-1-R", "code": "R", "starts_at": now - timedelta(days=3)}
@@ -44,3 +58,32 @@ def test_recent_session_gets_a_finalization_refresh():
         "last_synced_at": now - timedelta(hours=3),
     })
     assert current_session_due(session, now) is True
+
+
+def test_queue_backfill_pauses_while_dedicated_archive_runner_is_active():
+    database.sync_controls.insert_one({
+        "_id": "archive_backfill:2000:2026", "active": True, "updated_at": utcnow(),
+    })
+    counts = {"season": 0, "session": 0, "track": 0, "telemetry": 0, "backfill": 0}
+
+    schedule_historical_backfill(counts)
+
+    assert counts == {"season": 0, "session": 0, "track": 0, "telemetry": 0, "backfill": 0}
+    assert database.jobs.count_documents({}) == 0
+
+
+def test_stale_archive_checkpoint_does_not_pause_normal_backfill_forever():
+    database.sync_controls.insert_one({
+        "_id": "archive_backfill:2000:2026", "active": True,
+        "updated_at": utcnow() - timedelta(hours=1),
+    })
+    database.sync_controls.insert_one({
+        "_id": "historical_backfill", "active": True, "start": 2000,
+        "end": 2001, "include_telemetry": True,
+    })
+    counts = {"season": 0, "session": 0, "track": 0, "telemetry": 0, "backfill": 0}
+
+    schedule_historical_backfill(counts)
+
+    assert counts["backfill"] == 2
+    assert database.jobs.count_documents({"kind": "season", "status": "queued"}) == 2

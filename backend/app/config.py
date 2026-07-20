@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     historical_backfill_enabled: bool = False
     historical_backfill_start: int = 1950
     telemetry_backfill_enabled: bool = False
-    model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
+    # Keep shared/root defaults available, but let backend/.env override them
+    # for local development when commands are run from the backend directory.
+    model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
 
 
 @lru_cache

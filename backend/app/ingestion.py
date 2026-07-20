@@ -1,19 +1,36 @@
 import hashlib
 import json
+import re
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
 from pymongo.database import Database
 
 from .circuit_matching import circuit_match_score, country_variants
+from .contracts import ARCHIVE_SCHEMA_VERSION
 from .fastf1_adapter import FastF1Adapter, slugify
 from .mongo import set_dataset_status, utcnow
-from .serialization import TELEMETRY_POINTS_ENCODING, compress_telemetry_points
+from .serialization import (
+    TELEMETRY_POINTS_ENCODING,
+    TELEMETRY_SCHEMA_VERSION,
+    compress_telemetry_points,
+    normalize_telemetry_distance,
+    telemetry_points,
+)
 
 
 def _checksum(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _lap_identity(driver: Any, lap: Any) -> tuple[str, float | str]:
+    try:
+        normalized_lap: float | str = float(lap)
+    except (TypeError, ValueError):
+        normalized_lap = str(lap)
+    return str(driver), normalized_lap
 
 
 def _replace_many(collection, documents: list[dict[str, Any]]) -> None:
@@ -45,11 +62,52 @@ def sync_circuits(db: Database, adapter: FastF1Adapter, season: int | None = Non
             "source_attribution": existing.get("source_attribution"),
             "map_data": existing.get("map_data"),
             "map_reference_session": existing.get("map_reference_session"),
+            "map_source_url": existing.get("map_source_url"),
+            "map_source_attribution": existing.get("map_source_attribution"),
+            "map_catalog_id": existing.get("map_catalog_id"),
+            "map_catalog_name": existing.get("map_catalog_name"),
+            "map_match_score": existing.get("map_match_score"),
             "updated_at": now,
         })
     _replace_many(db.circuits, documents)
     set_dataset_status(db, str(season or "all"), "circuits", "available", source="FastF1 Jolpica", checksum=_checksum(documents))
     return len(documents)
+
+
+def link_event_circuits(db: Database, year: int | None = None) -> dict[str, Any]:
+    """Persist the canonical circuit identity used by every map view."""
+    query = {"season": year} if year is not None else {}
+    circuits = list(db.circuits.find({}, {
+        "name": 1, "country": 1, "locality": 1,
+    }))
+    matched = 0
+    unmatched = []
+    for event in db.events.find(query, {
+        "season": 1, "country": 1, "location": 1, "name": 1,
+    }):
+        accepted_countries = country_variants(event.get("country"))
+        candidates = [
+            circuit for circuit in circuits
+            if circuit.get("country") in accepted_countries
+        ]
+        target = f"{event.get('location', '')} {event.get('name', '')}"
+        ranked = sorted(
+            ((circuit_match_score(circuit, target), circuit) for circuit in candidates),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        if not ranked or (len(candidates) > 1 and ranked[0][0] < 55):
+            unmatched.append(str(event["_id"]))
+            continue
+        circuit_slug = str(ranked[0][1]["_id"])
+        db.events.update_one(
+            {"_id": event["_id"]}, {"$set": {"circuit_slug": circuit_slug}},
+        )
+        db.sessions.update_many(
+            {"event_id": event["_id"]}, {"$set": {"circuit_slug": circuit_slug}},
+        )
+        matched += 1
+    return {"matched": matched, "unmatched": unmatched}
 
 
 def sync_season(db: Database, adapter: FastF1Adapter, year: int) -> dict[str, int]:
@@ -61,7 +119,9 @@ def sync_season(db: Database, adapter: FastF1Adapter, year: int) -> dict[str, in
         event_document = {"_id": event["id"], **event, "synced_at": now}
         event_documents.append(event_document)
         for session in event.get("sessions", []):
+            existing_session = db.sessions.find_one({"_id": session["id"]}) or {}
             session_documents.append({
+                **existing_session,
                 "_id": session["id"],
                 **session,
                 "event_id": event["id"],
@@ -70,14 +130,21 @@ def sync_season(db: Database, adapter: FastF1Adapter, year: int) -> dict[str, in
                 "event_name": event["name"],
                 "country": event["country"],
                 "location": event["location"],
-                "status": "scheduled",
+                "status": existing_session.get("status", "scheduled"),
                 "synced_at": now,
             })
     _replace_many(db.events, event_documents)
     _replace_many(db.sessions, session_documents)
     db.seasons.replace_one(
         {"_id": year},
-        {"_id": year, "year": year, "event_count": len(events), "last_synced_at": now, "source": "FastF1"},
+        {
+            "_id": year,
+            "year": year,
+            "event_count": len(events),
+            "schema_version": ARCHIVE_SCHEMA_VERSION,
+            "last_synced_at": now,
+            "source": "FastF1",
+        },
         upsert=True,
     )
     counts = {"events": len(event_documents), "sessions": len(session_documents)}
@@ -89,6 +156,11 @@ def sync_season(db: Database, adapter: FastF1Adapter, year: int) -> dict[str, in
         try:
             rows = fetcher(year)
             documents = [{"_id": f"{year}:{row.get(identifier)}", "season": year, **row, "synced_at": now} for row in rows]
+            current_ids = [document["_id"] for document in documents]
+            db[entity].delete_many({
+                "season": year,
+                "_id": {"$nin": current_ids},
+            })
             _replace_many(db[entity], documents)
             counts[entity] = len(documents)
             set_dataset_status(db, str(year), entity, "available", source="FastF1 Jolpica", checksum=_checksum(rows))
@@ -110,6 +182,8 @@ def sync_season(db: Database, adapter: FastF1Adapter, year: int) -> dict[str, in
 
     try:
         counts["circuits"] = sync_circuits(db, adapter, year)
+        links = link_event_circuits(db, year)
+        counts["circuit_links"] = links["matched"]
     except Exception as exc:
         set_dataset_status(db, str(year), "circuits", "unavailable", source="FastF1 Jolpica", reason=str(exc))
     set_dataset_status(db, str(year), "calendar", "available", source="FastF1", checksum=_checksum(events))
@@ -144,6 +218,21 @@ def _normalized_id(session_id: str, row: dict[str, Any], index: int, *fields: st
 def persist_session_bundle(db: Database, adapter: FastF1Adapter, session_id: str) -> dict[str, int]:
     bundle = adapter.session_bundle(session_id)
     session_document = db.sessions.find_one({"_id": session_id}) or {}
+    driver_codes = {
+        str(row.get("driverId")): row.get("driverCode") or str(row.get("driverId"))
+        for row in db.drivers.find(
+            {"season": session_document.get("season")},
+            {"driverId": 1, "driverCode": 1},
+        )
+        if row.get("driverId")
+    }
+    for envelope in bundle.values():
+        if not isinstance(envelope.get("data"), list):
+            continue
+        for row in envelope["data"]:
+            driver_id = row.get("DriverId") or row.get("driverId")
+            if driver_id and (not row.get("Driver") or row.get("Driver") == driver_id):
+                row["Driver"] = driver_codes.get(str(driver_id), str(driver_id))
     summary = bundle.get("summary", {}).get("data")
     if isinstance(summary, dict):
         summary["name"] = summary.get("name") or session_document.get("name")
@@ -160,6 +249,18 @@ def persist_session_bundle(db: Database, adapter: FastF1Adapter, session_id: str
         "race-control": (db.race_control_messages, ("Time", "Message")),
     }
     for kind, envelope in bundle.items():
+        # Clear any previous completion marker before replacing the artifact
+        # or its normalized rows. A terminated process must leave this dataset
+        # resumable instead of allowing partial rows to look complete.
+        set_dataset_status(
+            db,
+            session_id,
+            kind,
+            "awaiting_data",
+            source=envelope.get("source", "FastF1"),
+            reason="Dataset ingestion is in progress.",
+            schema_version=envelope.get("schema_version"),
+        )
         artifact_id = adapter.artifact_key(session_id, kind, {})
         artifact = {
             "_id": artifact_id,
@@ -169,22 +270,47 @@ def persist_session_bundle(db: Database, adapter: FastF1Adapter, session_id: str
             "payload": envelope,
             "updated_at": utcnow(),
         }
+        db.artifacts.delete_many({
+            "session_id": session_id,
+            "kind": kind,
+            "_id": {"$ne": artifact_id},
+        })
         db.artifacts.replace_one({"_id": artifact_id}, artifact, upsert=True)
         data = envelope.get("data")
         if kind in collection_by_kind and isinstance(data, list):
             collection, fields = collection_by_kind[kind]
-            collection.delete_many({"session_id": session_id})
-            documents = [
-                {"_id": _normalized_id(session_id, row, index, *fields), "session_id": session_id, **row}
-                for index, row in enumerate(data)
-            ]
+            # Match the canonical key as well as its deterministic document
+            # prefix. The prefix also cleans rows written by older importers
+            # where an upstream ``session_id`` accidentally replaced ours.
+            collection.delete_many({"$or": [
+                {"session_id": session_id},
+                {"_id": {"$regex": f"^{re.escape(session_id)}:"}},
+            ]})
+            documents = []
+            for index, row in enumerate(data):
+                normalized = dict(row)
+                upstream_session_id = normalized.get("session_id")
+                if upstream_session_id not in (None, session_id):
+                    normalized["source_session_id"] = upstream_session_id
+                upstream_document_id = normalized.pop("_id", None)
+                if upstream_document_id is not None:
+                    normalized["source_document_id"] = upstream_document_id
+                normalized["session_id"] = session_id
+                normalized["_id"] = _normalized_id(session_id, row, index, *fields)
+                documents.append(normalized)
             if documents:
                 collection.insert_many(documents, ordered=False)
+            stored_count = collection.count_documents({"session_id": session_id})
+            if stored_count != len(documents):
+                raise RuntimeError(
+                    f"{kind} row count mismatch for {session_id}: "
+                    f"expected {len(documents)}, stored {stored_count}"
+                )
             counts[kind] = len(documents)
         set_dataset_status(
             db, session_id, kind, envelope.get("availability", "unavailable"),
             source=envelope.get("source", "FastF1"), reason=envelope.get("unavailable_reason"),
-            checksum=_checksum(data),
+            checksum=_checksum(data), schema_version=envelope.get("schema_version"),
         )
     db.sessions.update_one({"_id": session_id}, {"$set": {"status": "processed", "last_synced_at": utcnow()}})
     return counts
@@ -223,23 +349,153 @@ def persist_track(db: Database, adapter: FastF1Adapter, session_id: str) -> dict
 
 
 def persist_telemetry(db: Database, adapter: FastF1Adapter, session_id: str) -> int:
-    documents = adapter.session_telemetry_laps(session_id)
+    # Invalidate the previous completion marker before replacing any rows.
+    # If the process is interrupted between batches, the next run must rebuild
+    # the session instead of accepting a partial set of schema-current rows.
+    set_dataset_status(
+        db,
+        session_id,
+        "telemetry",
+        "awaiting_data",
+        source="FastF1",
+        reason="Telemetry ingestion is in progress.",
+        schema_version=TELEMETRY_SCHEMA_VERSION,
+    )
     db.telemetry_laps.delete_many({"session_id": session_id})
     checksum_rows = []
-    for item in documents:
+    stored_lap_identities = []
+    batch = []
+    count = 0
+    iterator = (
+        adapter.iter_session_telemetry_laps(session_id)
+        if hasattr(adapter, "iter_session_telemetry_laps")
+        else iter(adapter.session_telemetry_laps(session_id))
+    )
+    for item in iterator:
+        stored_lap_identities.append(
+            _lap_identity(item.get("driver"), item.get("lap")),
+        )
         item["_id"] = f"{session_id}:{item.get('driver')}:{item.get('lap')}"
         item["updated_at"] = utcnow()
-        points = item.pop("points", [])
-        item["points_compressed"] = compress_telemetry_points(points)
-        item["points_encoding"] = TELEMETRY_POINTS_ENCODING
-        item["point_count"] = len(points)
-        checksum_rows.append({"_id": item["_id"], "point_count": len(points)})
-    if documents:
-        db.telemetry_laps.insert_many(documents, ordered=False)
-    availability = "available" if documents else "unavailable"
-    reason = None if documents else "No telemetry laps were published for this session."
-    set_dataset_status(db, session_id, "telemetry", availability, source="FastF1", reason=reason, checksum=_checksum(checksum_rows))
-    return len(documents)
+        counts = {}
+        for stream in (None, "car", "position"):
+            prefix = f"{stream}_" if stream else ""
+            points = item.pop(f"{prefix}points", [])
+            if stream is None:
+                points = normalize_telemetry_distance(points, copy_points=False)
+            item[f"{prefix}points_compressed"] = compress_telemetry_points(points)
+            item[f"{prefix}points_encoding"] = TELEMETRY_POINTS_ENCODING
+            item[f"{prefix}point_count"] = len(points)
+            counts[f"{prefix}point_count"] = len(points)
+        item["schema_version"] = TELEMETRY_SCHEMA_VERSION
+        item["distance_normalized"] = True
+        checksum_rows.append({"_id": item["_id"], **counts})
+        batch.append(item)
+        count += 1
+        if len(batch) >= 50:
+            db.telemetry_laps.insert_many(batch, ordered=False)
+            batch = []
+    if batch:
+        db.telemetry_laps.insert_many(batch, ordered=False)
+    expected_laps = db.laps.count_documents({"session_id": session_id})
+    if expected_laps and count != expected_laps:
+        raise RuntimeError(
+            f"Telemetry lap count mismatch for {session_id}: "
+            f"expected {expected_laps} timing laps, stored {count} telemetry laps"
+        )
+    if expected_laps:
+        expected_lap_identities = Counter(
+            _lap_identity(row.get("Driver"), row.get("LapNumber"))
+            for row in db.laps.find(
+                {"session_id": session_id}, {"Driver": 1, "LapNumber": 1},
+            )
+        )
+        if expected_lap_identities != Counter(stored_lap_identities):
+            raise RuntimeError(
+                f"Telemetry lap identity mismatch for {session_id}; "
+                "stored driver/lap pairs do not match the timing archive"
+            )
+    availability = "available" if count else "unavailable"
+    reason = None if count else "No telemetry laps were published for this session."
+    set_dataset_status(
+        db,
+        session_id,
+        "telemetry",
+        availability,
+        source="FastF1",
+        reason=reason,
+        checksum=_checksum(checksum_rows),
+        schema_version=TELEMETRY_SCHEMA_VERSION,
+    )
+    return count
+
+
+def migrate_telemetry_schema(db: Database) -> dict[str, int]:
+    """Upgrade stored telemetry to lap-relative distance without refetching.
+
+    The compressed raw car and position streams are already lossless.  Only
+    the derived merged stream needs rewriting, which makes this migration much
+    cheaper and safer than downloading every completed session again.
+    """
+    migrated = 0
+    failed = 0
+    sessions: set[str] = set()
+    query = {
+        "$or": [
+            {"schema_version": {"$ne": TELEMETRY_SCHEMA_VERSION}},
+            {"distance_normalized": {"$ne": True}},
+        ]
+    }
+    projection = {
+        "session_id": 1,
+        "point_count": 1,
+        "points_encoding": 1,
+        "points_compressed": 1,
+    }
+    for document in db.telemetry_laps.find(query, projection):
+        points = telemetry_points(document)
+        expected = document.get("point_count")
+        if expected and len(points) != expected:
+            failed += 1
+            continue
+        normalized = normalize_telemetry_distance(points, copy_points=False)
+        db.telemetry_laps.update_one(
+            {"_id": document["_id"]},
+            {"$set": {
+                "points_compressed": compress_telemetry_points(normalized),
+                "points_encoding": TELEMETRY_POINTS_ENCODING,
+                "point_count": len(normalized),
+                "schema_version": TELEMETRY_SCHEMA_VERSION,
+                "distance_normalized": True,
+                "updated_at": utcnow(),
+            }},
+        )
+        sessions.add(str(document.get("session_id")))
+        migrated += 1
+
+    for session_id in sessions:
+        if db.telemetry_laps.count_documents({
+            "session_id": session_id,
+            "$or": [
+                {"schema_version": {"$ne": TELEMETRY_SCHEMA_VERSION}},
+                {"distance_normalized": {"$ne": True}},
+            ],
+        }) == 0:
+            db.dataset_status.update_one(
+                {"subject": session_id, "dataset": "telemetry"},
+                {"$set": {
+                    "schema_version": TELEMETRY_SCHEMA_VERSION,
+                    "updated_at": utcnow(),
+                }},
+            )
+    db.dataset_status.update_many(
+        {"dataset": "telemetry", "availability": "unavailable"},
+        {"$set": {
+            "schema_version": TELEMETRY_SCHEMA_VERSION,
+            "updated_at": utcnow(),
+        }},
+    )
+    return {"migrated": migrated, "failed": failed, "sessions": len(sessions)}
 
 
 def find_circuit_for_session(db: Database, session_id: str) -> dict[str, Any] | None:

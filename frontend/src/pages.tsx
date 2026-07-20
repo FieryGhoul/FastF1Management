@@ -999,6 +999,7 @@ type SessionDriver = {
   driver_number?: string | number | null;
   team_name?: string | null;
   telemetry_available?: boolean;
+  is_default?: boolean;
 };
 
 function DriverIdentity({
@@ -1456,12 +1457,27 @@ export function SessionPage() {
     [channels, setChannels] = useState("all"),
     [plotChannel, setPlotChannel] = useState("Speed"),
     [stream, setStream] = useState<"merged" | "car" | "position">("merged");
+  const sessionParts = sessionId?.split("-") ?? [];
+  const telemetryVisible = !(
+    sessionParts[0] === "2026" && sessionParts.at(-1)?.toUpperCase() !== "R"
+  );
+  const activeTab = !telemetryVisible && tab === "Telemetry" ? "Overview" : tab;
+  const sessionTabs = [
+    "Overview",
+    "Results",
+    "Laps",
+    ...(telemetryVisible ? ["Telemetry"] : []),
+    "Strategy",
+    "Weather",
+    "Race Control",
+    "Track",
+  ];
   const kind =
-    tab === "Overview"
+    activeTab === "Overview"
       ? "summary"
-      : tab === "Race Control"
+      : activeTab === "Race Control"
         ? "race-control"
-        : tab.toLowerCase();
+        : activeTab.toLowerCase();
   const path =
     kind === "telemetry"
       ? `/sessions/${sessionId}/telemetry?drivers=${encodeURIComponent(drivers)}&laps=${encodeURIComponent(lapNumber || "fastest")}&channels=${encodeURIComponent(channels)}&stream=${stream}`
@@ -1483,10 +1499,14 @@ export function SessionPage() {
     [driverRosterQuery.data?.data],
   );
   const telemetryDrivers = driverRoster;
+  const telemetryDriverReady =
+    kind !== "telemetry" ||
+    Boolean(drivers) ||
+    (driverRosterQuery.isFetched && telemetryDrivers.length === 0);
   const trackQuery = useQuery({
     queryKey: ["session", sessionId, "track"],
     queryFn: () => api<any>(`/sessions/${sessionId}/track`),
-    enabled: tab === "Track",
+    enabled: activeTab === "Track",
     refetchInterval: (result) =>
       result.state.data?.availability === "awaiting_data" ? 1000 : false,
   });
@@ -1501,7 +1521,8 @@ export function SessionPage() {
       stream,
     ],
     queryFn: () => api<any>(path),
-    enabled: kind !== "summary" && kind !== "track",
+    enabled:
+      kind !== "summary" && kind !== "track" && telemetryDriverReady,
     refetchInterval: (result) =>
       ["queued", "running"].includes(result.state.data?.status) ? 1500 : false,
   });
@@ -1526,11 +1547,25 @@ export function SessionPage() {
     "awaiting_data",
   ].includes(sessionState ?? "");
   useEffect(() => {
-    const automaticDriver = data?.traces?.[0]?.driver;
-    if (tab === "Telemetry" && !drivers && automaticDriver) {
-      setDrivers(automaticDriver);
+    if (!telemetryVisible && tab === "Telemetry") {
+      setTab("Overview");
+      setSearchParams({ tab: "Overview" }, { replace: true });
     }
-  }, [data, drivers, tab]);
+  }, [setSearchParams, tab, telemetryVisible]);
+  useEffect(() => {
+    const automaticDriver = data?.traces?.[0]?.driver;
+    const preferredDriver =
+      telemetryDrivers.find(
+        (driver) => driver.is_default && driver.telemetry_available,
+      ) ??
+      telemetryDrivers.find((driver) => driver.telemetry_available) ??
+      telemetryDrivers.find((driver) => driver.is_default) ??
+      telemetryDrivers[0];
+    if (activeTab === "Telemetry" && !drivers) {
+      const nextDriver = preferredDriver?.code ?? automaticDriver;
+      if (nextDriver) setDrivers(nextDriver);
+    }
+  }, [activeTab, data, drivers, telemetryDrivers]);
   const chartChannels = useMemo(() => {
     const traces = data?.traces ?? [];
     return (data?.channels ?? []).filter((channel: string) =>
@@ -1637,23 +1672,14 @@ export function SessionPage() {
         }
       />
       <Tabs
-        tabs={[
-          "Overview",
-          "Results",
-          "Laps",
-          "Telemetry",
-          "Strategy",
-          "Weather",
-          "Race Control",
-          "Track",
-        ]}
-        active={tab}
+        tabs={sessionTabs}
+        active={activeTab}
         onChange={(nextTab) => {
           setTab(nextTab);
           setSearchParams({ tab: nextTab });
         }}
       />
-      {tab === "Telemetry" && !waitingForSession && (
+      {activeTab === "Telemetry" && !waitingForSession && (
         <div className="telemetry-controls">
           <label>
             Drivers
@@ -1761,7 +1787,7 @@ export function SessionPage() {
         />
       ) : payload?.availability === "unavailable" ? (
         <Empty title="Detail unavailable" copy={payload.unavailable_reason} />
-      ) : tab === "Telemetry" && data ? (
+      ) : activeTab === "Telemetry" && data ? (
         <div className="telemetry-detail">
           <div className="chart-panel">
             <Suspense
@@ -1827,7 +1853,7 @@ export function SessionPage() {
             </section>
           ))}
         </div>
-      ) : tab === "Overview" && data ? (
+      ) : activeTab === "Overview" && data ? (
         <div className="session-overview">
           <div className="metric-grid">
             {Object.entries(data)
@@ -1841,16 +1867,16 @@ export function SessionPage() {
               ))}
           </div>
         </div>
-      ) : tab === "Track" && data ? (
+      ) : activeTab === "Track" && data ? (
         <TrackMap
           label={sessionId}
           points={data.points}
           corners={data.corners}
           rotation={data.rotation}
         />
-      ) : tab === "Laps" && Array.isArray(data) ? (
+      ) : activeTab === "Laps" && Array.isArray(data) ? (
         <LapAnalysis laps={data} driverRoster={driverRoster} />
-      ) : tab === "Results" && Array.isArray(data) ? (
+      ) : activeTab === "Results" && Array.isArray(data) ? (
         <ResultsAnalysis rows={data} />
       ) : Array.isArray(data) ? (
         <DataTable

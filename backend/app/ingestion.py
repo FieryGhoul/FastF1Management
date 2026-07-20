@@ -386,11 +386,13 @@ def persist_telemetry(db: Database, adapter: FastF1Adapter, session_id: str) -> 
         item["updated_at"] = utcnow()
         merged_points = item.pop("points", [])
         car_points = compact_car_points(item.pop("car_points", []) or merged_points)
-        # The original X/Y/Z position rows are intentionally discarded. The
-        # compact position stream retains only the time/distance index needed
-        # to reconstruct distance-based charts.
-        item.pop("position_points", None)
-        position_points = compact_distance_points(merged_points)
+        position_source = item.pop("position_points", [])
+        # The adapter now supplies this directly from distance-enriched car
+        # samples, avoiding FastF1's expensive merged/position calculations.
+        # The fallback keeps compatible adapters and interrupted old jobs safe.
+        position_points = compact_distance_points(position_source)
+        if not position_points:
+            position_points = compact_distance_points(merged_points)
         counts = {}
         for stream, points in (("car", car_points), ("position", position_points)):
             prefix = f"{stream}_"

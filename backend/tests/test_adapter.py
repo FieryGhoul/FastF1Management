@@ -173,30 +173,20 @@ def test_telemetry_lap_errors_are_not_silently_dropped():
         adapter.session_telemetry_laps("2025-1-Q")
 
 
-def test_telemetry_preserves_every_published_channel():
+def test_telemetry_extracts_only_compact_channels_without_merged_position_work():
     class Lap(dict):
         def get_telemetry(self):
-            return pd.DataFrame([{
-                "Time": pd.Timedelta(seconds=1),
-                "Distance": 100.0,
-                "Speed": 250,
-                "DriverAhead": "44",
-                "DistanceToDriverAhead": 12.5,
-                "RelativeDistance": 0.25,
-                "FutureChannel": "kept",
-            }])
+            raise AssertionError("merged telemetry must not be built")
 
         def get_car_data(self):
             return pd.DataFrame([{
-                "Time": pd.Timedelta(seconds=1), "Speed": 250,
-                "RawCarChannel": "kept",
+                "Time": pd.Timedelta(seconds=1), "Distance": 100.0,
+                "Speed": 250, "RPM": 11_000, "Throttle": 100,
+                "Brake": False, "nGear": 7, "Discarded": "drop",
             }])
 
         def get_pos_data(self):
-            return pd.DataFrame([{
-                "Time": pd.Timedelta(seconds=1), "X": 10,
-                "RawPositionChannel": "kept",
-            }])
+            raise AssertionError("position telemetry must not be loaded")
 
     class FakeILoc:
         def __getitem__(self, _index):
@@ -215,13 +205,12 @@ def test_telemetry_preserves_every_published_channel():
     adapter.load_session = lambda *_args, **_kwargs: FakeSession()
 
     telemetry = adapter.session_telemetry_laps("2025-1-Q")[0]
-    points = telemetry["points"]
-    assert points[0]["DriverAhead"] == "44"
-    assert points[0]["DistanceToDriverAhead"] == 12.5
-    assert points[0]["RelativeDistance"] == 0.25
-    assert points[0]["FutureChannel"] == "kept"
-    assert telemetry["car_points"][0]["RawCarChannel"] == "kept"
-    assert telemetry["position_points"][0]["RawPositionChannel"] == "kept"
+    assert "points" not in telemetry
+    assert telemetry["car_points"] == [{
+        "Time": 1000, "Speed": 250, "RPM": 11_000, "Throttle": 100,
+        "Brake": False, "Gear": 7,
+    }]
+    assert telemetry["position_points"] == [{"Time": 1000, "Distance": 0.0}]
 
 
 def test_results_and_laps_preserve_every_published_column():
@@ -279,8 +268,8 @@ def test_indexed_telemetry_slice_keeps_exact_published_lap_samples():
     ]
 
 
-def test_telemetry_merges_once_per_driver_before_slicing_laps():
-    calls = {"merged": 0, "car": 0, "position": 0}
+def test_telemetry_enriches_car_data_once_per_driver_before_slicing_laps():
+    calls = {"distance": 0, "car": 0}
 
     class Stream(pd.DataFrame):
         @property
@@ -290,9 +279,13 @@ def test_telemetry_merges_once_per_driver_before_slicing_laps():
         def slice_by_lap(self, _lap, **_kwargs):
             return self
 
-    merged = Stream([{"Time": pd.Timedelta(0), "Distance": 0.0, "Speed": 200}])
+        def add_distance(self):
+            calls["distance"] += 1
+            result = self.copy()
+            result["Distance"] = 0.0
+            return result
+
     car = Stream([{"Time": pd.Timedelta(0), "Speed": 199}])
-    position = Stream([{"Time": pd.Timedelta(0), "X": 1, "Y": 2}])
     laps = [
         {"Driver": "TST", "DriverNumber": "1", "LapNumber": 1},
         {"Driver": "TST", "DriverNumber": "1", "LapNumber": 2},
@@ -309,19 +302,9 @@ def test_telemetry_merges_once_per_driver_before_slicing_laps():
             return len(laps)
 
         @staticmethod
-        def get_telemetry():
-            calls["merged"] += 1
-            return merged
-
-        @staticmethod
         def get_car_data():
             calls["car"] += 1
             return car
-
-        @staticmethod
-        def get_pos_data():
-            calls["position"] += 1
-            return position
 
     class BulkLaps:
         columns = ["Driver"]
@@ -343,4 +326,42 @@ def test_telemetry_merges_once_per_driver_before_slicing_laps():
     documents = adapter.session_telemetry_laps("2025-1-Q")
 
     assert len(documents) == 2
-    assert calls == {"merged": 1, "car": 1, "position": 1}
+    assert calls == {"distance": 1, "car": 1}
+
+
+def test_on_demand_telemetry_uses_car_data_without_building_merged_stream():
+    class Lap(dict):
+        def get_car_data(self):
+            return pd.DataFrame([{
+                "Time": pd.Timedelta(0), "Distance": 0.0, "Speed": 250,
+                "RPM": 11_000, "Throttle": 100, "Brake": False, "nGear": 7,
+            }])
+
+        def get_telemetry(self):
+            raise AssertionError("merged telemetry must not be built")
+
+    lap = Lap(LapNumber=5, LapTime=pd.Timedelta(seconds=90))
+
+    class DriverLaps:
+        @staticmethod
+        def pick_fastest():
+            return lap
+
+    class Laps:
+        @staticmethod
+        def pick_drivers(_driver):
+            return DriverLaps()
+
+    class Session:
+        laps = Laps()
+
+    adapter = FastF1Adapter.__new__(FastF1Adapter)
+    data = adapter._telemetry(Session(), {
+        "drivers": "TST", "laps": "fastest", "channels": "all",
+        "stream": "merged",
+    })
+
+    assert data["channels"] == [
+        "Brake", "Distance", "Gear", "RPM", "Speed", "Throttle", "Time",
+    ]
+    assert data["traces"][0]["points"][0]["Gear"] == 7

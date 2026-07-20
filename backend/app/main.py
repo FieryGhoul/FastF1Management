@@ -13,7 +13,7 @@ from pymongo.database import Database
 
 from .circuit_matching import circuit_match_score, country_variants
 from .config import get_settings
-from .contracts import artifact_key
+from .contracts import artifact_key, stores_persistent_telemetry
 from .mongo import database, get_db, init_mongo, public_document, queue_job, utcnow
 from .on_demand import OnDemandArtifactCache
 from .security import COOKIE_NAME, authenticate, create_session, ensure_admin, get_admin, require_csrf
@@ -402,7 +402,7 @@ def telemetry(
     has_stored_telemetry = db.telemetry_laps.find_one(
         {"session_id": session_id}, {"_id": 1},
     ) is not None
-    if (
+    telemetry_needs_loading = (
         not telemetry_state
         or telemetry_state.get("schema_version") != TELEMETRY_SCHEMA_VERSION
         or telemetry_state.get("availability") == "awaiting_data"
@@ -410,7 +410,19 @@ def telemetry(
             telemetry_state.get("availability") == "available"
             and not has_stored_telemetry
         )
-    ) and on_demand_cache is not None:
+    )
+    if telemetry_needs_loading and on_demand_cache is not None:
+        # Give a requested race priority in the durable worker queue while the
+        # API prepares only the requested lap. Future visits then read MongoDB
+        # immediately instead of repeating a FastF1 session load.
+        if stores_persistent_telemetry(session_id):
+            queue_job(
+                db,
+                "telemetry",
+                f"telemetry:{session_id}",
+                {"session_id": session_id},
+                priority=200,
+            )
         return on_demand_cache.get_or_schedule(
             background_tasks,
             session_id,
@@ -551,6 +563,18 @@ def session_drivers(
         if code
     }
     codes = telemetry_codes | set(by_code)
+    fastest_lap = db.laps.find_one(
+        {
+            "session_id": session_id,
+            "Driver": {"$in": list(codes)},
+            "LapTime": {"$gt": 0},
+        },
+        {"_id": 0, "Driver": 1},
+        sort=[("LapTime", ASCENDING)],
+    )
+    default_driver = (
+        str(fastest_lap.get("Driver", "")).upper() if fastest_lap else ""
+    )
     season_drivers = {
         str(row.get("driverCode", "")).upper(): row
         for row in db.drivers.find(
@@ -575,6 +599,7 @@ def session_drivers(
             "driver_number": result.get("DriverNumber") or season_driver.get("driverNumber"),
             "team_name": result.get("TeamName"),
             "telemetry_available": code in telemetry_codes,
+            "is_default": code == default_driver,
         })
     rows.sort(key=lambda row: (str(row["full_name"]), row["code"]))
     return {

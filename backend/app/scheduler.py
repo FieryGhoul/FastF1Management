@@ -93,9 +93,12 @@ def schedule_historical_backfill(counts: dict[str, int]) -> None:
                 track_queued += 1
                 track_events.add(event_id)
             if (include_telemetry and year >= 2018 and telemetry_queued < 1
-                    and stores_persistent_telemetry(session_id, session.get("code"))
-                    and dataset_due(session_id, "telemetry")):
-                queue_job(database, "telemetry", f"telemetry:{session_id}", {"session_id": session_id})
+                and stores_persistent_telemetry(session_id, session.get("code"))
+                and dataset_due(session_id, "telemetry")):
+                queue_job(
+                    database, "telemetry", f"telemetry:{session_id}",
+                    {"session_id": session_id}, priority=-10,
+                )
                 telemetry_queued += 1
             if core_queued >= 10 and track_queued >= 2 and (telemetry_queued >= 1 or not include_telemetry):
                 break
@@ -146,7 +149,10 @@ def schedule_once() -> dict[str, int]:
                 and int(session.get("season", 0)) >= 2018
                 and stores_persistent_telemetry(session_id, session.get("code"))
                 and dataset_due(session_id, "telemetry")):
-            queue_job(database, "telemetry", f"telemetry:{session_id}", {"session_id": session_id})
+            queue_job(
+                database, "telemetry", f"telemetry:{session_id}",
+                {"session_id": session_id}, priority=100,
+            )
             counts["telemetry"] += 1
 
     schedule_historical_backfill(counts)

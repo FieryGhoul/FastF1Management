@@ -169,7 +169,13 @@ class FastF1Adapter:
             return cached[0]
         year, round_number, code = self.parse_session_id(session_id)
         session = fastf1.get_session(year, round_number, code)
-        session.load(telemetry=telemetry)
+        if telemetry:
+            # Telemetry requests need laps/results plus timing streams, but
+            # not weather or race-control downloads. Core ingestion fetches
+            # those separately through the non-telemetry path.
+            session.load(telemetry=True, weather=False, messages=False)
+        else:
+            session.load(telemetry=False)
         self._loaded_sessions[session_id] = (session, telemetry)
         # Core artifacts and telemetry are persisted adjacently, so only the
         # current session needs to stay resident.  A race session can retain
@@ -519,7 +525,7 @@ class FastF1Adapter:
         return result
 
     def iter_session_telemetry_laps(self, session_id: str) -> Iterator[dict[str, Any]]:
-        """Yield lossless combined car/position telemetry one lap at a time."""
+        """Yield the compact car and time/distance streams one lap at a time."""
         year, _, _ = self.parse_session_id(session_id)
         if year < 2018:
             return []
@@ -530,11 +536,11 @@ class FastF1Adapter:
         # objects and is compatible with all supported pandas 2.x releases.
         extraction_errors = []
 
-        def document(lap, telemetry, car_data, position_data) -> dict[str, Any]:
-            # ``records`` has already cleaned every telemetry field.  Running
-            # ``clean`` over this complete document again recursively walked
-            # hundreds of thousands of point values a second time.  Clean
-            # only the lap metadata here and reuse the lossless point rows.
+        def document(lap, car_data) -> dict[str, Any]:
+            car_rows = records(car_data, [
+                "Time", "Speed", "RPM", "Throttle", "Brake", "nGear", "Gear",
+            ])
+            distance_rows = records(car_data, ["Time", "Distance"])
             return {
                 "session_id": session_id,
                 "driver": clean(lap.get("Driver")),
@@ -546,29 +552,24 @@ class FastF1Adapter:
                 "sector_3": clean(lap.get("Sector3Time")),
                 "compound": clean(lap.get("Compound")),
                 "is_accurate": clean(lap.get("IsAccurate")),
-                # Persist every channel FastF1 publishes.  The API can
-                # select display channels later without losing archive
-                # fidelity or newly added upstream fields.
-                "points": records(telemetry, list(telemetry.columns)),
-                "car_points": records(car_data, list(car_data.columns)),
-                "position_points": records(position_data, list(position_data.columns)),
+                "car_points": compact_car_points(car_rows),
+                "position_points": compact_distance_points(distance_rows),
             }
 
-        # Merging car and position telemetry also computes DriverAhead and
-        # distance channels. Doing that once per lap repeats the same costly
-        # pandas work hundreds of times. Merge once per driver, then take
-        # exact lap slices from the lossless driver-level streams.
+        # The compact archive does not retain X/Y/Z, DriverAhead or the merged
+        # copy, so do not build them. FastF1's merged telemetry path performs
+        # costly resampling and driver-ahead calculations for an entire race.
+        # Add distance to the car stream once per driver and slice that stream
+        # for every lap instead.
         if hasattr(session.laps, "pick_drivers") and "Driver" in session.laps.columns:
             drivers = session.laps["Driver"].dropna().unique().tolist()
             for driver in drivers:
                 driver_laps = session.laps.pick_drivers(driver)
                 try:
-                    merged = driver_laps.get_telemetry()
                     car_stream = driver_laps.get_car_data()
-                    position_stream = driver_laps.get_pos_data()
-                    merged_times = self._session_time_values(merged)
+                    if "Distance" not in car_stream.columns:
+                        car_stream = car_stream.add_distance()
                     car_times = self._session_time_values(car_stream)
-                    position_times = self._session_time_values(position_stream)
                 except Exception as exc:
                     extraction_errors.append(f"{driver} all laps: {exc}")
                     continue
@@ -577,20 +578,12 @@ class FastF1Adapter:
                     if pd.isna(lap.get("LapNumber")):
                         continue
                     try:
-                        telemetry = self._slice_published_lap_points(
-                            merged, lap, merged_times,
-                        )
-                        if "Distance" not in telemetry.columns:
-                            telemetry = telemetry.add_distance()
-                        if telemetry.empty:
-                            continue
                         car_data = self._slice_published_lap_points(
                             car_stream, lap, car_times,
                         )
-                        position_data = self._slice_published_lap_points(
-                            position_stream, lap, position_times,
-                        )
-                        yield document(lap, telemetry, car_data, position_data)
+                        if car_data.empty:
+                            continue
+                        yield document(lap, car_data)
                     except Exception as exc:
                         extraction_errors.append(
                             f"{driver} lap {lap.get('LapNumber')}: {exc}"
@@ -604,14 +597,12 @@ class FastF1Adapter:
                 if pd.isna(lap.get("Driver")) or pd.isna(lap.get("LapNumber")):
                     continue
                 try:
-                    telemetry = lap.get_telemetry()
-                    if "Distance" not in telemetry.columns:
-                        telemetry = telemetry.add_distance()
-                    if telemetry.empty:
+                    car_data = lap.get_car_data()
+                    if "Distance" not in car_data.columns:
+                        car_data = car_data.add_distance()
+                    if car_data.empty:
                         continue
-                    yield document(
-                        lap, telemetry, lap.get_car_data(), lap.get_pos_data(),
-                    )
+                    yield document(lap, car_data)
                 except Exception as exc:
                     extraction_errors.append(
                         f"{lap.get('Driver')} lap {lap.get('LapNumber')}: {exc}"
@@ -689,19 +680,16 @@ class FastF1Adapter:
             laps = session.laps.pick_drivers(driver)
             lap_choice = options.get("laps", "fastest")
             lap = laps.pick_fastest() if lap_choice == "fastest" else laps[laps["LapNumber"] == int(lap_choice)].iloc[0]
+            source = lap.get_car_data()
+            if "Distance" not in source.columns:
+                source = source.add_distance()
+            source_rows = records(source, list(source.columns))
             if stream == "car":
-                source = lap.get_car_data()
-                points = compact_car_points(records(source, list(source.columns)))
+                points = compact_car_points(source_rows)
             elif stream == "position":
-                source = lap.get_telemetry()
-                if "Distance" not in source.columns:
-                    source = source.add_distance()
-                points = compact_distance_points(records(source, list(source.columns)))
+                points = compact_distance_points(source_rows)
             else:
-                source = lap.get_telemetry()
-                if "Distance" not in source.columns:
-                    source = source.add_distance()
-                points = compact_merged_points(records(source, list(source.columns)))
+                points = compact_merged_points(source_rows)
             point_channels = list(dict.fromkeys(
                 key for point in points for key in point
             ))

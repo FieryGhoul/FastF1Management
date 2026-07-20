@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from app.mongo import claim_job, database, queue_job, recover_stale_jobs, utcnow
-from app.scheduler import current_session_due, schedule_historical_backfill
+from app.scheduler import current_session_due, schedule_historical_backfill, schedule_once
 
 
 def setup_function():
@@ -87,3 +87,25 @@ def test_stale_archive_checkpoint_does_not_pause_normal_backfill_forever():
 
     assert counts["backfill"] == 2
     assert database.jobs.count_documents({"kind": "season", "status": "queued"}) == 2
+
+
+def test_current_year_race_telemetry_is_queued_ahead_of_archive_work(monkeypatch):
+    import app.scheduler as scheduler_module
+
+    year = utcnow().year
+    monkeypatch.setattr(scheduler_module.settings, "telemetry_backfill_enabled", True)
+    monkeypatch.setattr(scheduler_module.settings, "historical_backfill_enabled", False)
+    database.sessions.insert_one({
+        "_id": f"{year}-1-R", "season": year, "round": 1, "code": "R",
+        "event_id": f"{year}-1",
+        "starts_at": utcnow() - timedelta(days=3),
+    })
+    database.dataset_status.insert_one({
+        "subject": str(year), "dataset": "calendar", "availability": "available",
+        "last_synced_at": utcnow(),
+    })
+
+    schedule_once()
+
+    job = database.jobs.find_one({"key": f"telemetry:{year}-1-R"})
+    assert job["priority"] == 100

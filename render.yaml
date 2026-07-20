@@ -129,4 +129,4 @@ services:
       - key: HISTORICAL_BACKFILL_START
         value: "2000"
       - key: TELEMETRY_BACKFILL_ENABLED
-        value: "false"
+        value: "true"

@@ -267,6 +267,10 @@ def test_session_driver_roster_returns_full_names_for_telemetry_dropdown():
         "_id": "2026-1-R:TST:1", "session_id": "2026-1-R",
         "driver": "TST", "lap": 1,
     })
+    database.laps.insert_many([
+        {"session_id": "2026-1-R", "Driver": "TST", "LapTime": 89_000},
+        {"session_id": "2026-1-R", "Driver": "RES", "LapTime": 91_000},
+    ])
 
     with TestClient(app) as client:
         response = client.get("/api/v1/sessions/2026-1-R/drivers")
@@ -276,10 +280,12 @@ def test_session_driver_roster_returns_full_names_for_telemetry_dropdown():
         {
             "code": "RES", "full_name": "Reserve Driver", "driver_number": "2",
             "team_name": "Test Team", "telemetry_available": False,
+            "is_default": False,
         },
         {
             "code": "TST", "full_name": "Test Driver", "driver_number": "1",
             "team_name": "Test Team", "telemetry_available": True,
+            "is_default": True,
         },
     ]
 
@@ -313,6 +319,8 @@ def test_available_telemetry_marker_without_rows_uses_on_demand_repair(monkeypat
         "2026-10-R", "telemetry",
         {"drivers": "", "laps": "fastest", "channels": "", "stream": "merged"},
     )]
+    durable_job = database.jobs.find_one({"key": "telemetry:2026-10-R"})
+    assert durable_job["priority"] == 200
 
 
 def test_telemetry_endpoint_exposes_original_car_stream():

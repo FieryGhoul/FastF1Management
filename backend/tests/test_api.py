@@ -219,6 +219,32 @@ def test_telemetry_endpoint_returns_every_channel_by_default():
     assert data["traces"][0]["returned_point_count"] == 1
 
 
+def test_session_driver_roster_returns_full_names_for_telemetry_dropdown():
+    database.results.insert_many([
+        {
+            "session_id": "2026-1-R", "Abbreviation": "TST",
+            "FullName": "Test Driver", "DriverNumber": "1", "TeamName": "Test Team",
+        },
+        {
+            "session_id": "2026-1-R", "Abbreviation": "RES",
+            "FullName": "Reserve Driver", "DriverNumber": "2", "TeamName": "Test Team",
+        },
+    ])
+    database.telemetry_laps.insert_one({
+        "_id": "2026-1-R:TST:1", "session_id": "2026-1-R",
+        "driver": "TST", "lap": 1,
+    })
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/sessions/2026-1-R/drivers")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == [{
+        "code": "TST", "full_name": "Test Driver", "driver_number": "1",
+        "team_name": "Test Team", "telemetry_available": True,
+    }]
+
+
 def test_telemetry_endpoint_exposes_original_car_stream():
     merged = [{"Distance": 0.0, "Time": 0, "Speed": 120}]
     car = [{"Time": 0, "Speed": 119, "Source": "car"}]

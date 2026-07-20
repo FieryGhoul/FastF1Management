@@ -536,11 +536,10 @@ export function StandingsPage() {
       label: kind === "drivers" ? "Driver" : "Constructor",
       render: (r: Record<string, unknown>) =>
         kind === "drivers" ? (
-          <b>
-            {String(
-              r.driverCode ?? `${r.givenName ?? ""} ${r.familyName ?? ""}`,
-            )}
-          </b>
+          <DriverIdentity
+            fullName={`${r.givenName ?? ""} ${r.familyName ?? ""}`.trim()}
+            code={String(r.driverCode ?? "—")}
+          />
         ) : (
           <b>{String(r.constructorName ?? "—")}</b>
         ),
@@ -654,6 +653,11 @@ function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
                   ? `${r.givenName ?? ""} ${r.familyName ?? ""}`
                   : String(r.constructorName ?? r.name ?? "Unknown")}
               </h2>
+              {kind === "drivers" && (
+                <small className="entity-short-name">
+                  {String(r.driverCode ?? "—").toUpperCase()}
+                </small>
+              )}
               <p>
                 {String(
                   r.driverNationality ??
@@ -989,6 +993,94 @@ type LapRecord = {
   DeletedReason?: string;
 };
 
+type SessionDriver = {
+  code: string;
+  full_name: string;
+  driver_number?: string | number | null;
+  team_name?: string | null;
+  telemetry_available?: boolean;
+};
+
+function DriverIdentity({
+  fullName,
+  code,
+}: {
+  fullName?: string | null;
+  code?: string | null;
+}) {
+  return (
+    <span className="driver-identity">
+      <strong>{fullName || code || "—"}</strong>
+      <small>{code || "—"}</small>
+    </span>
+  );
+}
+
+function DriverDropdown({
+  options,
+  value,
+  onChange,
+  multiple = false,
+}: {
+  options: SessionDriver[];
+  value: string[];
+  onChange: (codes: string[]) => void;
+  multiple?: boolean;
+}) {
+  const selected = options.filter((driver) => value.includes(driver.code));
+  const toggle = (code: string, target: HTMLButtonElement) => {
+    if (!multiple) {
+      onChange([code]);
+      target.closest("details")?.removeAttribute("open");
+      return;
+    }
+    onChange(
+      value.includes(code)
+        ? value.filter((selectedCode) => selectedCode !== code)
+        : [...value, code].slice(-2),
+    );
+  };
+  return (
+    <details className="driver-dropdown">
+      <summary>
+        {selected.length ? (
+          selected.map((driver) => (
+            <DriverIdentity
+              key={driver.code}
+              fullName={driver.full_name}
+              code={driver.code}
+            />
+          ))
+        ) : (
+          <DriverIdentity fullName="Fastest available driver" code="AUTO" />
+        )}
+      </summary>
+      <div className="driver-dropdown-menu">
+        {multiple && (
+          <button type="button" onClick={() => onChange([])}>
+            <DriverIdentity fullName="Fastest available driver" code="AUTO" />
+          </button>
+        )}
+        {options.map((driver) => (
+          <button
+            type="button"
+            key={driver.code}
+            className={value.includes(driver.code) ? "selected" : ""}
+            onClick={(event) => toggle(driver.code, event.currentTarget)}
+          >
+            <DriverIdentity fullName={driver.full_name} code={driver.code} />
+            {multiple && value.includes(driver.code) && <Check size={15} />}
+          </button>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function driverName(code: string | undefined, roster: SessionDriver[]) {
+  return roster.find((driver) => driver.code === code)?.full_name || code || "—";
+}
+
 function fieldLabel(key: string) {
   return key
     .replaceAll("_", " ")
@@ -996,7 +1088,10 @@ function fieldLabel(key: string) {
     .replace(/^./, (letter) => letter.toUpperCase());
 }
 
-function allDataColumns(rows: Record<string, unknown>[]) {
+function allDataColumns(
+  rows: Record<string, unknown>[],
+  driverRoster: SessionDriver[] = [],
+) {
   const keys: string[] = [];
   const seen = new Set<string>();
   rows.forEach((row) =>
@@ -1007,10 +1102,37 @@ function allDataColumns(rows: Record<string, unknown>[]) {
       }
     }),
   );
-  return keys.map((key) => ({ key, label: fieldLabel(key) }));
+  return keys.map((key) => {
+    if (["Driver", "Abbreviation", "driverCode"].includes(key)) {
+      return {
+        key,
+        label: fieldLabel(key),
+        render: (row: Record<string, unknown>) => {
+          const code = String(row[key] ?? "—");
+          const storedName = String(
+            row.FullName ??
+              `${row.givenName ?? ""} ${row.familyName ?? ""}`.trim(),
+          );
+          return (
+            <DriverIdentity
+              fullName={storedName || driverName(code, driverRoster)}
+              code={code}
+            />
+          );
+        },
+      };
+    }
+    return { key, label: fieldLabel(key) };
+  });
 }
 
-function LapAnalysis({ laps }: { laps: LapRecord[] }) {
+function LapAnalysis({
+  laps,
+  driverRoster,
+}: {
+  laps: LapRecord[];
+  driverRoster: SessionDriver[];
+}) {
   const drivers = useMemo(
     () =>
       [...new Set(laps.map((lap) => lap.Driver).filter(Boolean))] as string[],
@@ -1064,7 +1186,11 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
     () => ({
       animation: false,
       tooltip: { trigger: "axis" },
-      legend: { data: seriesDrivers },
+      legend: {
+        data: seriesDrivers.map(
+          (code) => `${driverName(code, driverRoster)} (${code})`,
+        ),
+      },
       grid: { left: 64, right: 24, top: 48, bottom: 48 },
       xAxis: { type: "value", name: "Lap", minInterval: 1 },
       yAxis: {
@@ -1076,7 +1202,7 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
         },
       },
       series: seriesDrivers.map((code) => ({
-        name: code,
+        name: `${driverName(code, driverRoster)} (${code})`,
         type: "line",
         showSymbol: driver !== "ALL",
         symbolSize: 5,
@@ -1086,22 +1212,18 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
           .map((lap) => [lap.LapNumber, lap.LapTime]),
       })),
     }),
-    [driver, filtered, seriesDrivers],
+    [driver, driverRoster, filtered, seriesDrivers],
   );
   return (
     <div className="lap-analysis">
       <div className="lap-toolbar">
         <label>
           Driver
-          <select
-            value={driver}
-            onChange={(event) => setDriver(event.target.value)}
-          >
-            <option value="ALL">All drivers</option>
-            {drivers.map((code) => (
-              <option key={code}>{code}</option>
-            ))}
-          </select>
+          <DriverDropdown
+            options={driverRoster.filter((item) => drivers.includes(item.code))}
+            value={driver === "ALL" ? [] : [driver]}
+            onChange={(codes) => setDriver(codes[0] ?? "ALL")}
+          />
         </label>
         <label>
           Compound
@@ -1140,7 +1262,11 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
         <Metric
           label="Fastest"
           value={duration(fastest)}
-          detail={driver === "ALL" ? "Filtered field" : driver}
+          detail={
+            driver === "ALL"
+              ? "Filtered field"
+              : `${driverName(driver, driverRoster)} · ${driver}`
+          }
         />
         <Metric
           label="Average"
@@ -1172,6 +1298,7 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
         <DataTable
           columns={allDataColumns(
             filtered as unknown as Record<string, unknown>[],
+            driverRoster,
           )}
           rows={filtered as unknown as Record<string, unknown>[]}
         />
@@ -1203,8 +1330,10 @@ function LapAnalysis({ laps }: { laps: LapRecord[] }) {
                   <b>{lap.LapNumber ?? "—"}</b>
                 </td>
                 <td>
-                  <strong>{lap.Driver ?? "—"}</strong>
-                  <small>{lap.Team}</small>
+                  <DriverIdentity
+                    fullName={driverName(lap.Driver, driverRoster)}
+                    code={lap.Driver}
+                  />
                 </td>
                 <td>{lap.Position ?? "—"}</td>
                 <td className={lap.LapTime === fastest ? "fastest-time" : ""}>
@@ -1259,12 +1388,10 @@ function ResultsAnalysis({ rows }: { rows: Record<string, unknown>[] }) {
       key: "Abbreviation",
       label: "Driver",
       render: (row: Record<string, unknown>) => (
-        <>
-          <strong>{formatValue(row.Abbreviation, "Abbreviation")}</strong>
-          <small className="table-subline">
-            {formatValue(row.FullName, "FullName")}
-          </small>
-        </>
+        <DriverIdentity
+          fullName={formatValue(row.FullName, "FullName")}
+          code={formatValue(row.Abbreviation, "Abbreviation")}
+        />
       ),
     },
     { key: "TeamName", label: "Team" },
@@ -1345,6 +1472,19 @@ export function SessionPage() {
     refetchInterval: (result) =>
       ["queued", "running"].includes(result.state.data?.status) ? 1500 : false,
   });
+  const driverRosterQuery = useQuery({
+    queryKey: ["session-drivers", sessionId],
+    queryFn: () =>
+      api<ApiEnvelope<SessionDriver[]>>(`/sessions/${sessionId}/drivers`),
+    enabled: Boolean(sessionId),
+  });
+  const driverRoster = useMemo(
+    () => driverRosterQuery.data?.data ?? [],
+    [driverRosterQuery.data?.data],
+  );
+  const telemetryDrivers = driverRoster.filter(
+    (driver) => driver.telemetry_available,
+  );
   const trackQuery = useQuery({
     queryKey: ["session", sessionId, "track"],
     queryFn: () => api<any>(`/sessions/${sessionId}/track`),
@@ -1387,6 +1527,12 @@ export function SessionPage() {
     "in_progress",
     "awaiting_data",
   ].includes(sessionState ?? "");
+  useEffect(() => {
+    const automaticDriver = data?.traces?.[0]?.driver;
+    if (tab === "Telemetry" && !drivers && automaticDriver) {
+      setDrivers(automaticDriver);
+    }
+  }, [data, drivers, tab]);
   const chartChannels = useMemo(() => {
     const traces = data?.traces ?? [];
     return (data?.channels ?? []).filter((channel: string) =>
@@ -1407,10 +1553,12 @@ export function SessionPage() {
   }, [data]);
   const telemetryOption = useMemo(() => {
     const traces = data?.traces ?? [];
+    const traceName = (code: string) =>
+      `${driverName(code, driverRoster)} (${code})`;
     return {
       animation: false,
       tooltip: { trigger: "axis" },
-      legend: { data: traces.map((t: any) => t.driver) },
+      legend: { data: traces.map((t: any) => traceName(t.driver)) },
       grid: { left: 58, right: 20, top: 40, bottom: 45 },
       xAxis: {
         type: "value",
@@ -1427,7 +1575,7 @@ export function SessionPage() {
             activePlotChannel !== "Delta" || index === 1,
         )
         .map((t: any) => ({
-          name: t.driver,
+          name: traceName(t.driver),
           type: "line",
           showSymbol: false,
           data: t.points
@@ -1439,7 +1587,7 @@ export function SessionPage() {
             .map((p: any) => [p[xChannel], p[activePlotChannel]]),
         })),
     };
-  }, [activePlotChannel, data, xChannel]);
+  }, [activePlotChannel, data, driverRoster, xChannel]);
   if (payload?.status === "failed")
     return (
       <div className="page">
@@ -1511,11 +1659,11 @@ export function SessionPage() {
         <div className="telemetry-controls">
           <label>
             Drivers
-            <input
-              value={drivers}
-              onChange={(e) => setDrivers(e.target.value.toUpperCase())}
-              placeholder="VER,NOR"
-              maxLength={7}
+            <DriverDropdown
+              options={telemetryDrivers}
+              value={drivers.split(",").filter(Boolean)}
+              onChange={(codes) => setDrivers(codes.join(","))}
+              multiple
             />
           </label>
           <label>
@@ -1636,9 +1784,9 @@ export function SessionPage() {
               {data.traces?.map((t: any) => (
                 <Metric
                   key={t.driver}
-                  label={t.driver}
+                  label={driverName(t.driver, driverRoster)}
                   value={duration(t.lap_time)}
-                  detail={`${lapNumber ? "Selected" : "Fastest"} lap ${t.lap} · ${Number(t.point_count ?? t.points?.length ?? 0).toLocaleString()} points`}
+                  detail={`${t.driver} · ${lapNumber ? "Selected" : "Fastest"} lap ${t.lap} · ${Number(t.point_count ?? t.points?.length ?? 0).toLocaleString()} points`}
                 />
               ))}
               <Metric
@@ -1671,7 +1819,10 @@ export function SessionPage() {
           {data.traces?.map((trace: any) => (
             <section className="telemetry-samples" key={`${trace.driver}-${trace.lap}`}>
               <div className="data-view-toolbar">
-                <span>{trace.driver} · lap {trace.lap} telemetry samples</span>
+                <DriverIdentity
+                  fullName={driverName(trace.driver, driverRoster)}
+                  code={trace.driver}
+                />
                 <b>{Number(trace.returned_point_count ?? trace.points?.length ?? 0).toLocaleString()} shown</b>
               </div>
               <DataTable
@@ -1703,12 +1854,12 @@ export function SessionPage() {
           rotation={data.rotation}
         />
       ) : tab === "Laps" && Array.isArray(data) ? (
-        <LapAnalysis laps={data} />
+        <LapAnalysis laps={data} driverRoster={driverRoster} />
       ) : tab === "Results" && Array.isArray(data) ? (
         <ResultsAnalysis rows={data} />
       ) : Array.isArray(data) ? (
         <DataTable
-          columns={allDataColumns(data)}
+          columns={allDataColumns(data, driverRoster)}
           rows={data}
         />
       ) : data ? (

@@ -505,6 +505,64 @@ def telemetry(
     }
 
 
+@app.get("/api/v1/sessions/{session_id}/drivers")
+def session_drivers(
+    session_id: str,
+    db: Database = Depends(get_db),
+) -> dict:
+    """Return display names for drivers who have data in this session."""
+    year = int(session_id.split("-", 1)[0])
+    result_rows = list(db.results.find(
+        {"session_id": session_id},
+        {
+            "_id": 0, "Abbreviation": 1, "FullName": 1,
+            "DriverNumber": 1, "TeamName": 1,
+        },
+    ))
+    by_code = {
+        str(row["Abbreviation"]).upper(): row
+        for row in result_rows if row.get("Abbreviation")
+    }
+    telemetry_codes = {
+        str(code).upper()
+        for code in db.telemetry_laps.distinct("driver", {"session_id": session_id})
+        if code
+    }
+    codes = telemetry_codes or set(by_code)
+    season_drivers = {
+        str(row.get("driverCode", "")).upper(): row
+        for row in db.drivers.find(
+            {"season": year, "driverCode": {"$in": list(codes)}},
+            {
+                "_id": 0, "driverCode": 1, "givenName": 1,
+                "familyName": 1, "driverNumber": 1,
+            },
+        )
+        if row.get("driverCode")
+    }
+    rows = []
+    for code in codes:
+        result = by_code.get(code, {})
+        season_driver = season_drivers.get(code, {})
+        full_name = result.get("FullName") or " ".join(filter(None, [
+            season_driver.get("givenName"), season_driver.get("familyName"),
+        ]))
+        rows.append({
+            "code": code,
+            "full_name": full_name or code,
+            "driver_number": result.get("DriverNumber") or season_driver.get("driverNumber"),
+            "team_name": result.get("TeamName"),
+            "telemetry_available": code in telemetry_codes,
+        })
+    rows.sort(key=lambda row: (str(row["full_name"]), row["code"]))
+    return {
+        "availability": "available" if rows else "awaiting_data",
+        "unavailable_reason": None if rows else "The session driver list is not available yet.",
+        "data": rows,
+        "source": "MongoDB",
+    }
+
+
 @app.get("/api/v1/sessions/{session_id}/{kind}")
 def session_artifact(
     session_id: str,

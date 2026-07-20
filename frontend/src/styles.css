@@ -765,6 +765,13 @@ p {
   text-transform: uppercase;
   margin: 34px 0 5px;
 }
+.entity-short-name {
+  display: block;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
 .entity-grid p,
 .circuit-grid p {
   font-size: 12px;
@@ -1005,6 +1012,90 @@ tbody tr:hover {
   background: var(--panel);
   color: var(--ink);
   padding: 0 12px;
+}
+.driver-identity {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  line-height: 1.15;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.driver-identity strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+.driver-identity small {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+.driver-dropdown {
+  position: relative;
+  min-width: 220px;
+}
+.driver-dropdown summary {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 8px 34px 8px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  list-style: none;
+  position: relative;
+}
+.driver-dropdown summary::-webkit-details-marker {
+  display: none;
+}
+.driver-dropdown summary:after {
+  content: "⌄";
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-55%);
+  color: var(--muted);
+  font-size: 18px;
+}
+.driver-dropdown[open] summary:after {
+  transform: translateY(-45%) rotate(180deg);
+}
+.driver-dropdown-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  width: max(100%, 260px);
+  max-height: 340px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 28%);
+}
+.driver-dropdown-menu button {
+  width: 100%;
+  min-height: 48px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+}
+.driver-dropdown-menu button:hover,
+.driver-dropdown-menu button.selected {
+  background: var(--soft);
+}
+.driver-dropdown-menu button.selected > svg {
+  color: var(--accent);
 }
 .chart-panel {
   border: 1px solid var(--line);

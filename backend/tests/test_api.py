@@ -182,32 +182,46 @@ def test_session_overview_uses_calendar_metadata_without_processing(monkeypatch)
     assert response.json()["data"]["event"] == "British Grand Prix"
 
 
-def test_session_tabs_only_include_stored_details_and_telemetry_is_race_only():
+def test_session_tabs_advertise_on_demand_telemetry_for_timing_era_races():
     database.sessions.insert_many([
         {
             "_id": "2025-1-R", "id": "2025-1-R", "code": "R",
-            "event_id": "2025-1", "starts_at": "2025-01-01T00:00:00+00:00",
+            "season": 2025, "round": 1, "event_id": "2025-1",
+            "starts_at": "2025-01-01T00:00:00+00:00",
         },
         {
             "_id": "2025-1-Q", "id": "2025-1-Q", "code": "Q",
-            "event_id": "2025-1", "starts_at": "2024-12-31T00:00:00+00:00",
+            "season": 2025, "round": 1, "event_id": "2025-1",
+            "starts_at": "2024-12-31T00:00:00+00:00",
+        },
+        {
+            "_id": "2017-1-R", "id": "2017-1-R", "code": "R",
+            "season": 2017, "round": 1, "event_id": "2017-1",
+            "starts_at": "2017-01-01T00:00:00+00:00",
         },
     ])
     database.results.insert_one({"session_id": "2025-1-R", "Position": 1})
     database.laps.insert_one({"session_id": "2025-1-R", "LapNumber": 1})
-    database.telemetry_laps.insert_many([
-        {"session_id": "2025-1-R", "driver": "TST", "lap": 1},
-        {"session_id": "2025-1-Q", "driver": "TST", "lap": 1},
-    ])
+    # Qualifying has an obsolete stored row while the race has none.  The
+    # race tab must still be visible so its first visit can trigger on-demand
+    # loading; non-race telemetry remains outside the public durable scope.
+    database.telemetry_laps.insert_one({
+        "session_id": "2025-1-Q", "driver": "TST", "lap": 1,
+    })
 
     with TestClient(app) as client:
         race = client.get("/api/v1/sessions/2025-1-R/availability")
         qualifying = client.get("/api/v1/sessions/2025-1-Q/availability")
+        historical_race = client.get("/api/v1/sessions/2017-1-R/availability")
 
     assert race.json()["data"]["tabs"] == [
         "Overview", "Results", "Laps", "Telemetry",
     ]
+    assert race.json()["data"]["datasets"]["Telemetry"] is True
     assert qualifying.json()["data"]["tabs"] == ["Overview"]
+    assert qualifying.json()["data"]["datasets"]["Telemetry"] is False
+    assert historical_race.json()["data"]["tabs"] == ["Overview"]
+    assert historical_race.json()["data"]["datasets"]["Telemetry"] is False
 
 
 def test_historical_stored_laps_are_served_before_timing_era_guard():

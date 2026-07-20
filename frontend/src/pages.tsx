@@ -1744,14 +1744,26 @@ export function SessionPage() {
       ),
     enabled: Boolean(sessionId),
   });
-  const isRaceSession = sessionId?.split("-").at(-1)?.toUpperCase() === "R";
+  const sessionYear = Number(sessionIdParts[0]);
+  const isRaceSession = sessionIdParts.at(-1)?.toUpperCase() === "R";
+  const telemetryEligible = isRaceSession && sessionYear >= 2018;
   const storedTabs = availabilityQuery.data?.data?.tabs;
-  const sessionTabs = useMemo(
-    () => (storedTabs ?? ["Overview"]).filter(
-      (candidate) => candidate !== "Telemetry" || isRaceSession,
-    ),
-    [isRaceSession, storedTabs],
-  );
+  const sessionTabs = useMemo(() => {
+    const tabs = (storedTabs ?? ["Overview"]).filter(
+      (candidate) => candidate !== "Telemetry" || telemetryEligible,
+    );
+    if (!telemetryEligible || tabs.includes("Telemetry")) return tabs;
+
+    // Opening this tab starts the on-demand telemetry import. Do not require
+    // stored telemetry before showing the control that requests it.
+    const lapsIndex = tabs.indexOf("Laps");
+    const insertAt = lapsIndex >= 0 ? lapsIndex + 1 : tabs.length;
+    return [
+      ...tabs.slice(0, insertAt),
+      "Telemetry",
+      ...tabs.slice(insertAt),
+    ];
+  }, [storedTabs, telemetryEligible]);
   const activeTab = sessionTabs.includes(tab) ? tab : "Overview";
   const kind =
     activeTab === "Overview"

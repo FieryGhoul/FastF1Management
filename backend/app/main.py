@@ -545,7 +545,7 @@ def session_availability(
     session_id: str,
     db: Database = Depends(get_db),
 ) -> dict:
-    """Return only tabs backed by stored, non-empty session details."""
+    """Return stored session tabs plus race telemetry that can load on demand."""
     session = db.sessions.find_one({"_id": session_id})
     if not session:
         raise HTTPException(404, "Session not found in MongoDB")
@@ -554,9 +554,12 @@ def session_availability(
         "Overview": True,
         "Results": db.results.find_one({"session_id": session_id}, {"_id": 1}) is not None,
         "Laps": db.laps.find_one({"session_id": session_id}, {"_id": 1}) is not None,
+        # Race telemetry is also available through the on-demand loader.  Do
+        # not hide the tab while MongoDB is still empty: opening the tab is
+        # what starts that first load and queues its durable copy.
         "Telemetry": (
-            str(session.get("code", "")).upper() == "R"
-            and db.telemetry_laps.find_one({"session_id": session_id}, {"_id": 1}) is not None
+            int(session.get("season") or session_id.split("-", 1)[0]) >= 2018
+            and stores_persistent_telemetry(session_id, session.get("code"))
         ),
         "Strategy": db.strategies.find_one({"session_id": session_id}, {"_id": 1}) is not None,
         "Weather": db.weather_samples.find_one({"session_id": session_id}, {"_id": 1}) is not None,

@@ -1348,7 +1348,7 @@ export function SessionPage() {
   const trackQuery = useQuery({
     queryKey: ["session", sessionId, "track"],
     queryFn: () => api<any>(`/sessions/${sessionId}/track`),
-    enabled: tab === "Overview" || tab === "Track",
+    enabled: tab === "Track",
     refetchInterval: (result) =>
       result.state.data?.availability === "awaiting_data" ? 1000 : false,
   });
@@ -1602,7 +1602,7 @@ export function SessionPage() {
         <Empty
           loading
           title="Processing session"
-          copy="The worker is loading and caching this session. This page refreshes when the job completes."
+          copy="The backend is loading and caching the requested data. This page refreshes when it completes."
         />
       ) : waitingForSession ? (
         <Empty
@@ -1654,17 +1654,6 @@ export function SessionPage() {
                 />
               ))}
           </div>
-          <TrackMap
-            label={sessionSummary?.location ?? sessionId}
-            points={trackQuery.data?.data?.points}
-            corners={trackQuery.data?.data?.corners}
-            rotation={trackQuery.data?.data?.rotation}
-            emptyMessage={
-              trackQuery.error
-                ? "The stored outline could not be loaded."
-                : "Loading the stored FastF1 circuit outline."
-            }
-          />
         </div>
       ) : tab === "Track" && data ? (
         <TrackMap

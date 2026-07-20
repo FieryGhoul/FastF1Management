@@ -36,6 +36,14 @@ services:
         value: "false"
       - key: TELEMETRY_BACKFILL_ENABLED
         value: "false"
+      - key: ON_DEMAND_ENABLED
+        value: "true"
+      - key: FASTF1_CACHE
+        value: /cache/fastf1
+      - key: ON_DEMAND_CACHE
+        value: /cache/on-demand
+      - key: ON_DEMAND_CACHE_MAX_MB
+        value: "512"
 
   - type: web
     name: race-data-web

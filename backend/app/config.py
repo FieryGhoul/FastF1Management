@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     frontend_hostname: str | None = None
     fastf1_cache: Path = Path(".cache/fastf1")
+    on_demand_enabled: bool = False
+    on_demand_cache: Path = Path(".cache/on-demand")
+    on_demand_cache_max_mb: int = 512
     admin_username: str = "admin"
     admin_password: str = "change-me"
     cookie_secure: bool = False

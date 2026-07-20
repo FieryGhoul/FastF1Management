@@ -671,22 +671,43 @@ class FastF1Adapter:
         drivers = [d.strip().upper() for d in options.get("drivers", "").split(",") if d.strip()][:2]
         if not drivers:
             drivers = list(session.results["Abbreviation"].dropna().head(1))
-        requested = [c.strip() for c in options.get("channels", "Speed,RPM,Throttle,Brake,nGear,DRS").split(",")]
-        allowed = [c for c in requested if c in {"Speed", "RPM", "Throttle", "Brake", "nGear", "DRS"}]
+        requested = [
+            c.strip()
+            for c in options.get(
+                "channels", "Speed,RPM,Throttle,Brake,nGear,DRS",
+            ).split(",")
+            if c.strip()
+        ][:24]
+        stream = options.get("stream", "merged")
         traces = []
+        available_channels: set[str] = set()
         for driver in drivers:
             laps = session.laps.pick_drivers(driver)
             lap_choice = options.get("laps", "fastest")
             lap = laps.pick_fastest() if lap_choice == "fastest" else laps[laps["LapNumber"] == int(lap_choice)].iloc[0]
-            telemetry = lap.get_telemetry()
-            if "Distance" not in telemetry.columns:
+            if stream == "car":
+                telemetry = lap.get_car_data()
+            elif stream == "position":
+                telemetry = lap.get_pos_data()
+            else:
+                telemetry = lap.get_telemetry()
+            if stream == "merged" and "Distance" not in telemetry.columns:
                 telemetry = telemetry.add_distance()
+            available_channels.update(str(column) for column in telemetry.columns)
+            allowed = [column for column in requested if column in telemetry.columns]
             stride = max(1, int(np.ceil(len(telemetry) / 1500)))
-            columns = ["Distance", "Time", "X", "Y", *allowed]
+            columns = list(dict.fromkeys([
+                column
+                for column in (
+                    "Distance", "Time", "SessionTime", "X", "Y", "Z", *allowed,
+                )
+                if column in telemetry.columns
+            ]))
             traces.append({"driver": driver, "lap": clean(lap.get("LapNumber")),
                            "lap_time": clean(lap.get("LapTime")),
                            "points": records(telemetry.iloc[::stride], columns)})
-        if len(traces) == 2:
+        returned_channels = [channel for channel in requested if channel in available_channels]
+        if stream == "merged" and len(traces) == 2:
             reference = traces[0]["points"]
             comparison = traces[1]["points"]
             ref_distance = np.array([point["Distance"] for point in reference if point.get("Distance") is not None])
@@ -696,7 +717,13 @@ class FastF1Adapter:
                     if point.get("Distance") is not None and point.get("Time") is not None:
                         point["Delta"] = point["Time"] - float(np.interp(point["Distance"], ref_distance, ref_time))
                 traces[1]["comparison_note"] = f"Positive delta means {traces[1]['driver']} is behind {traces[0]['driver']}."
-        return {"channels": [*allowed, "Delta"] if len(traces) == 2 else allowed, "traces": traces}
+            returned_channels.append("Delta")
+        return {
+            "stream": stream,
+            "channels": returned_channels,
+            "available_channels": sorted(available_channels),
+            "traces": traces,
+        }
 
     @staticmethod
     def artifact_key(session_id: str, kind: str, options: dict[str, Any]) -> str:

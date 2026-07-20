@@ -149,6 +149,24 @@ API_HOSTPORT=<api-service>.onrender.com
 
 Do not include `https://` in `API_HOSTPORT`. Nginx supplies the scheme and keeps
 browser requests on the frontend origin. Both free services can sleep after
-inactivity, so the first request can be slow. Free web services also do not
-replace the continuously running ingestion worker and scheduler; populate
-Atlas from an existing database or run those processes elsewhere for a demo.
+inactivity, so the first request can be slow.
+
+To fetch only the session tabs visitors actually open, set these additional
+variables on the API service:
+
+```env
+ON_DEMAND_ENABLED=true
+FASTF1_CACHE=/cache/fastf1
+ON_DEMAND_CACHE=/cache/on-demand
+ON_DEMAND_CACHE_MAX_MB=512
+```
+
+When MongoDB does not already contain a requested session artifact, the API
+returns a queued response, downloads only the tab the visitor opened, and
+caches the rendered response in the API container. It does not add that
+payload to MongoDB. FastF1 work is serialized to reduce memory pressure.
+
+This cache is temporary. Render deletes a free service's local files when it
+spins down, restarts, or redeploys, so the first request after a cold start
+downloads the data again. Telemetry can still exceed a free instance's memory
+for especially large race sessions.

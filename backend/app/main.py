@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
-from fastapi import Body, Cookie, Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, Body, Cookie, Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import ASCENDING, DESCENDING
 from pymongo.database import Database
@@ -15,12 +15,22 @@ from .circuit_matching import circuit_match_score, country_variants
 from .config import get_settings
 from .contracts import artifact_key
 from .mongo import database, get_db, init_mongo, public_document, queue_job, utcnow
+from .on_demand import OnDemandArtifactCache
 from .security import COOKIE_NAME, authenticate, create_session, ensure_admin, get_admin, require_csrf
 from .serialization import TELEMETRY_SCHEMA_VERSION, telemetry_points
 
 
 settings = get_settings()
 login_attempts: dict[str, list[datetime]] = {}
+on_demand_cache = (
+    OnDemandArtifactCache(
+        settings.on_demand_cache,
+        settings.fastf1_cache,
+        max_bytes=settings.on_demand_cache_max_mb * 1024 * 1024,
+    )
+    if settings.on_demand_enabled
+    else None
+)
 
 
 @asynccontextmanager
@@ -318,7 +328,12 @@ def circuit_map(slug: str, db: Database = Depends(get_db)) -> dict:
     }
 
 
-def stored_session_payload(db: Database, session_id: str, kind: str) -> dict[str, Any]:
+def stored_session_payload(
+    db: Database,
+    background_tasks: BackgroundTasks,
+    session_id: str,
+    kind: str,
+) -> dict[str, Any]:
     state = session_state(db, session_id)
     if state:
         return state
@@ -333,12 +348,17 @@ def stored_session_payload(db: Database, session_id: str, kind: str) -> dict[str
         circuit_row = find_circuit(db, session) if session else None
         if circuit_row and circuit_row.get("map_data"):
             return {"availability": "available", "unavailable_reason": None, "data": circuit_row["map_data"], "source": "MongoDB canonical circuit map", "updated_at": circuit_row.get("updated_at")}
+    if on_demand_cache is not None:
+        return on_demand_cache.get_or_schedule(
+            background_tasks, session_id, kind, {},
+        )
     return {"availability": "awaiting_data", "unavailable_reason": "The scheduled ingestion worker has not stored this dataset yet.", "data": [], "source": "MongoDB"}
 
 
 @app.get("/api/v1/sessions/{session_id}/telemetry")
 def telemetry(
     session_id: str,
+    background_tasks: BackgroundTasks,
     drivers: str = "",
     laps: str = Query(default="fastest", max_length=16),
     channels: str = "Speed,RPM,Throttle,Brake,nGear,DRS",
@@ -350,9 +370,39 @@ def telemetry(
         return state
     if int(session_id.split("-", 1)[0]) < 2018:
         return {"availability": "unavailable", "unavailable_reason": "Telemetry is available from 2018 onward.", "data": None, "source": "MongoDB"}
+    lap_selection = laps.strip().lower()
+    selected_lap = None
+    if lap_selection != "fastest":
+        try:
+            selected_lap = int(lap_selection)
+        except ValueError as exc:
+            raise HTTPException(422, "Lap must be 'fastest' or a positive number") from exc
+        if selected_lap < 1:
+            raise HTTPException(422, "Lap must be 'fastest' or a positive number")
+    requested_drivers = [value.strip().upper() for value in drivers.split(",") if value.strip()][:2]
+    requested_channels = [
+        value.strip() for value in channels.split(",")
+        if value.strip() and len(value.strip()) <= 64
+    ][:24]
     telemetry_state = db.dataset_status.find_one({
         "subject": session_id, "dataset": "telemetry",
     })
+    if (
+        not telemetry_state
+        or telemetry_state.get("schema_version") != TELEMETRY_SCHEMA_VERSION
+        or telemetry_state.get("availability") == "awaiting_data"
+    ) and on_demand_cache is not None:
+        return on_demand_cache.get_or_schedule(
+            background_tasks,
+            session_id,
+            "telemetry",
+            {
+                "drivers": ",".join(requested_drivers),
+                "laps": lap_selection,
+                "channels": ",".join(requested_channels),
+                "stream": stream,
+            },
+        )
     if not telemetry_state:
         return {
             "availability": "awaiting_data",
@@ -375,23 +425,9 @@ def telemetry(
             "source": telemetry_state.get("source", "MongoDB"),
             "updated_at": telemetry_state.get("updated_at"),
         }
-    lap_selection = laps.strip().lower()
-    selected_lap = None
-    if lap_selection != "fastest":
-        try:
-            selected_lap = int(lap_selection)
-        except ValueError as exc:
-            raise HTTPException(422, "Lap must be 'fastest' or a positive number") from exc
-        if selected_lap < 1:
-            raise HTTPException(422, "Lap must be 'fastest' or a positive number")
-    requested_drivers = [value.strip().upper() for value in drivers.split(",") if value.strip()][:2]
     if not requested_drivers:
         fastest = db.telemetry_laps.find_one({"session_id": session_id, "lap_time": {"$ne": None}}, sort=[("lap_time", ASCENDING)])
         requested_drivers = [fastest["driver"]] if fastest else []
-    requested_channels = [
-        value.strip() for value in channels.split(",")
-        if value.strip() and len(value.strip()) <= 64
-    ][:24]
     point_stream = None if stream == "merged" else stream
     traces = []
     available_channels: set[str] = set()
@@ -454,8 +490,13 @@ def telemetry(
 
 
 @app.get("/api/v1/sessions/{session_id}/{kind}")
-def session_artifact(session_id: str, kind: Literal["summary", "results", "laps", "strategy", "weather", "race-control", "track"], db: Database = Depends(get_db)) -> dict:
-    return stored_session_payload(db, session_id, kind)
+def session_artifact(
+    session_id: str,
+    kind: Literal["summary", "results", "laps", "strategy", "weather", "race-control", "track"],
+    background_tasks: BackgroundTasks,
+    db: Database = Depends(get_db),
+) -> dict:
+    return stored_session_payload(db, background_tasks, session_id, kind)
 
 
 @app.get("/api/v1/jobs/{job_id}")

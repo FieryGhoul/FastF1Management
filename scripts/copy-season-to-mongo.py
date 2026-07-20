@@ -59,6 +59,25 @@ def batches(documents: Iterator[dict[str, Any]], size: int = 250) -> Iterator[li
         yield batch
 
 
+def replacement_filter(
+    collection_name: str, document: dict[str, Any]
+) -> dict[str, Any]:
+    if collection_name == "dataset_status":
+        return {
+            "subject": document["subject"],
+            "dataset": document["dataset"],
+        }
+    return {"_id": document["_id"]}
+
+
+def replacement_document(
+    collection_name: str, document: dict[str, Any]
+) -> dict[str, Any]:
+    if collection_name == "dataset_status":
+        return {key: value for key, value in document.items() if key != "_id"}
+    return document
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Copy one race-data season to another MongoDB deployment"
@@ -114,7 +133,11 @@ def main() -> int:
             for batch in batches(source_collection.find(query)):
                 destination[collection_name].bulk_write(
                     [
-                        ReplaceOne({"_id": document["_id"]}, document, upsert=True)
+                        ReplaceOne(
+                            replacement_filter(collection_name, document),
+                            replacement_document(collection_name, document),
+                            upsert=True,
+                        )
                         for document in batch
                     ],
                     ordered=False,

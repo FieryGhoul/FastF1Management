@@ -102,6 +102,7 @@ services:
     build: ./frontend
     environment:
       PORT: 80
+      API_SCHEME: http
       API_HOSTPORT: api:8000
     ports:
       - "8080:80"

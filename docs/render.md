@@ -134,3 +134,21 @@ Verify that:
 When adding a custom domain, attach it to `race-data-web`. API requests and
 WebSockets remain under that same domain through Nginx, so the private API does
 not need to be exposed publicly.
+
+## Free-tier alternative
+
+Render private services and background workers are paid. For a demo deployment,
+create the API as a second free **Web Service** instead of a private service.
+Use the backend Dockerfile/context and the same Uvicorn command described above,
+then set these variables on the frontend service:
+
+```env
+API_SCHEME=https
+API_HOSTPORT=<api-service>.onrender.com
+```
+
+Do not include `https://` in `API_HOSTPORT`. Nginx supplies the scheme and keeps
+browser requests on the frontend origin. Both free services can sleep after
+inactivity, so the first request can be slow. Free web services also do not
+replace the continuously running ingestion worker and scheduler; populate
+Atlas from an existing database or run those processes elsewhere for a demo.

@@ -63,6 +63,76 @@ def test_public_calendar_reads_mongodb_without_upstream_calls():
     assert response.json()["source"] == "MongoDB"
 
 
+def test_session_overview_uses_calendar_metadata_without_processing(monkeypatch):
+    class UnexpectedCache:
+        def get_or_schedule(self, *_args, **_kwargs):
+            raise AssertionError("overview must not trigger an upstream session load")
+
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "on_demand_cache", UnexpectedCache())
+    database.sessions.insert_one({
+        "_id": "1950-1-R", "id": "1950-1-R", "code": "R",
+        "name": "Race", "event_name": "British Grand Prix",
+        "country": "United Kingdom", "location": "Silverstone",
+        "starts_at": "1950-05-13T14:00:00+00:00",
+    })
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/sessions/1950-1-R/summary")
+
+    assert response.status_code == 200
+    assert response.json()["availability"] == "available"
+    assert response.json()["source"] == "MongoDB calendar"
+    assert response.json()["data"]["event"] == "British Grand Prix"
+
+
+def test_session_tabs_only_include_stored_details_and_telemetry_is_race_only():
+    database.sessions.insert_many([
+        {
+            "_id": "2025-1-R", "id": "2025-1-R", "code": "R",
+            "event_id": "2025-1", "starts_at": "2025-01-01T00:00:00+00:00",
+        },
+        {
+            "_id": "2025-1-Q", "id": "2025-1-Q", "code": "Q",
+            "event_id": "2025-1", "starts_at": "2024-12-31T00:00:00+00:00",
+        },
+    ])
+    database.results.insert_one({"session_id": "2025-1-R", "Position": 1})
+    database.laps.insert_one({"session_id": "2025-1-R", "LapNumber": 1})
+    database.telemetry_laps.insert_many([
+        {"session_id": "2025-1-R", "driver": "TST", "lap": 1},
+        {"session_id": "2025-1-Q", "driver": "TST", "lap": 1},
+    ])
+
+    with TestClient(app) as client:
+        race = client.get("/api/v1/sessions/2025-1-R/availability")
+        qualifying = client.get("/api/v1/sessions/2025-1-Q/availability")
+
+    assert race.json()["data"]["tabs"] == [
+        "Overview", "Results", "Laps", "Telemetry",
+    ]
+    assert qualifying.json()["data"]["tabs"] == ["Overview"]
+
+
+def test_historical_stored_laps_are_served_before_timing_era_guard():
+    database.sessions.insert_one({
+        "_id": "1950-1-R", "id": "1950-1-R", "code": "R",
+        "starts_at": "1950-05-13T14:00:00+00:00",
+    })
+    database.laps.insert_one({
+        "_id": "1950-1-R:TST:1", "session_id": "1950-1-R",
+        "Driver": "TST", "LapNumber": 1, "LapTime": 120_000,
+    })
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/sessions/1950-1-R/laps")
+
+    assert response.status_code == 200
+    assert response.json()["availability"] == "available"
+    assert response.json()["data"][0]["LapNumber"] == 1
+
+
 def test_future_session_is_scheduled_not_failed():
     database.sessions.insert_one({
         "_id": "2099-1-FP1", "id": "2099-1-FP1", "name": "Practice 1", "code": "FP1",

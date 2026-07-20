@@ -344,11 +344,54 @@ def stored_session_payload(
     artifact = db.artifacts.find_one({"_id": artifact_key(session_id, kind, {})})
     if artifact:
         return artifact["payload"]
+    stored_collections = {
+        "results": (db.results, [("Position", ASCENDING)]),
+        "laps": (db.laps, [("LapNumber", ASCENDING), ("Position", ASCENDING)]),
+        "strategy": (db.strategies, [("Driver", ASCENDING), ("Stint", ASCENDING)]),
+        "weather": (db.weather_samples, [("Time", ASCENDING)]),
+        "race-control": (db.race_control_messages, [("Time", ASCENDING)]),
+    }
+    if kind in stored_collections:
+        collection, sort = stored_collections[kind]
+        rows = [
+            public_document(row)
+            for row in collection.find({"session_id": session_id}).sort(sort)
+        ]
+        if rows:
+            return {
+                "availability": "available",
+                "unavailable_reason": None,
+                "data": rows,
+                "source": "MongoDB normalized archive",
+            }
+    session = db.sessions.find_one({"_id": session_id})
+    if kind == "summary" and session:
+        # Calendar metadata is enough to render Overview immediately. Never
+        # download a complete FastF1 race merely to show its name and date.
+        return {
+            "availability": "available",
+            "unavailable_reason": None,
+            "data": {
+                "name": session.get("name"),
+                "date": session.get("starts_at"),
+                "event": session.get("event_name"),
+                "country": session.get("country"),
+                "location": session.get("location"),
+                "total_laps": None,
+                "drivers": [],
+            },
+            "source": "MongoDB calendar",
+            "updated_at": session.get("last_synced_at") or session.get("synced_at"),
+        }
     year = int(session_id.split("-", 1)[0])
     if year < 2018 and kind not in {"summary", "results", "track"}:
-        return {"availability": "unavailable", "unavailable_reason": "Detailed timing data is available from 2018 onward.", "data": [], "source": "MongoDB"}
+        return {
+            "availability": "unavailable",
+            "unavailable_reason": "No additional stored detail is available for this historical session.",
+            "data": [],
+            "source": "MongoDB",
+        }
     if kind == "track":
-        session = db.sessions.find_one({"_id": session_id})
         circuit_row = find_circuit(db, session) if session else None
         if circuit_row and circuit_row.get("map_data"):
             return {"availability": "available", "unavailable_reason": None, "data": circuit_row["map_data"], "source": "MongoDB canonical circuit map", "updated_at": circuit_row.get("updated_at")}
@@ -357,6 +400,47 @@ def stored_session_payload(
             background_tasks, session_id, kind, {},
         )
     return {"availability": "awaiting_data", "unavailable_reason": "The scheduled ingestion worker has not stored this dataset yet.", "data": [], "source": "MongoDB"}
+
+
+@app.get("/api/v1/sessions/{session_id}/availability")
+def session_availability(
+    session_id: str,
+    db: Database = Depends(get_db),
+) -> dict:
+    """Return only tabs backed by stored, non-empty session details."""
+    session = db.sessions.find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(404, "Session not found in MongoDB")
+    circuit = find_circuit(db, session)
+    available = {
+        "Overview": True,
+        "Results": db.results.find_one({"session_id": session_id}, {"_id": 1}) is not None,
+        "Laps": db.laps.find_one({"session_id": session_id}, {"_id": 1}) is not None,
+        "Telemetry": (
+            str(session.get("code", "")).upper() == "R"
+            and db.telemetry_laps.find_one({"session_id": session_id}, {"_id": 1}) is not None
+        ),
+        "Strategy": db.strategies.find_one({"session_id": session_id}, {"_id": 1}) is not None,
+        "Weather": db.weather_samples.find_one({"session_id": session_id}, {"_id": 1}) is not None,
+        "Race Control": db.race_control_messages.find_one({"session_id": session_id}, {"_id": 1}) is not None,
+        "Track": bool(circuit and circuit.get("map_data")),
+    }
+    tabs = [
+        tab for tab in (
+            "Overview", "Results", "Laps", "Telemetry", "Strategy",
+            "Weather", "Race Control", "Track",
+        )
+        if available[tab]
+    ]
+    return {
+        "availability": "available",
+        "data": {
+            "session_code": session.get("code"),
+            "tabs": tabs,
+            "datasets": available,
+        },
+        "source": "MongoDB",
+    }
 
 
 @app.get("/api/v1/sessions/{session_id}/telemetry")

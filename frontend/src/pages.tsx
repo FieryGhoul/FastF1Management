@@ -1457,21 +1457,23 @@ export function SessionPage() {
     [channels, setChannels] = useState("all"),
     [plotChannel, setPlotChannel] = useState("Speed"),
     [stream, setStream] = useState<"merged" | "car" | "position">("merged");
-  const sessionParts = sessionId?.split("-") ?? [];
-  const telemetryVisible = !(
-    sessionParts[0] === "2026" && sessionParts.at(-1)?.toUpperCase() !== "R"
+  const availabilityQuery = useQuery({
+    queryKey: ["session", sessionId, "availability"],
+    queryFn: () =>
+      api<ApiEnvelope<{ session_code?: string; tabs: string[] }>>(
+        `/sessions/${sessionId}/availability`,
+      ),
+    enabled: Boolean(sessionId),
+  });
+  const isRaceSession = sessionId?.split("-").at(-1)?.toUpperCase() === "R";
+  const storedTabs = availabilityQuery.data?.data?.tabs;
+  const sessionTabs = useMemo(
+    () => (storedTabs ?? ["Overview"]).filter(
+      (candidate) => candidate !== "Telemetry" || isRaceSession,
+    ),
+    [isRaceSession, storedTabs],
   );
-  const activeTab = !telemetryVisible && tab === "Telemetry" ? "Overview" : tab;
-  const sessionTabs = [
-    "Overview",
-    "Results",
-    "Laps",
-    ...(telemetryVisible ? ["Telemetry"] : []),
-    "Strategy",
-    "Weather",
-    "Race Control",
-    "Track",
-  ];
+  const activeTab = sessionTabs.includes(tab) ? tab : "Overview";
   const kind =
     activeTab === "Overview"
       ? "summary"
@@ -1547,11 +1549,11 @@ export function SessionPage() {
     "awaiting_data",
   ].includes(sessionState ?? "");
   useEffect(() => {
-    if (!telemetryVisible && tab === "Telemetry") {
+    if (availabilityQuery.isFetched && !sessionTabs.includes(tab)) {
       setTab("Overview");
       setSearchParams({ tab: "Overview" }, { replace: true });
     }
-  }, [setSearchParams, tab, telemetryVisible]);
+  }, [availabilityQuery.isFetched, sessionTabs, setSearchParams, tab]);
   useEffect(() => {
     const automaticDriver = data?.traces?.[0]?.driver;
     const preferredDriver =

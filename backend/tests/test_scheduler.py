@@ -109,3 +109,27 @@ def test_current_year_race_telemetry_is_queued_ahead_of_archive_work(monkeypatch
 
     job = database.jobs.find_one({"key": f"telemetry:{year}-1-R"})
     assert job["priority"] == 100
+
+
+def test_historical_backfill_queues_races_but_not_other_sessions():
+    database.sync_controls.insert_one({
+        "_id": "historical_backfill", "active": True, "start": 2025,
+        "end": 2025, "include_telemetry": False,
+    })
+    database.seasons.insert_one({"_id": 2025, "year": 2025})
+    database.sessions.insert_many([
+        {
+            "_id": "2025-1-R", "season": 2025, "round": 1, "code": "R",
+            "event_id": "2025-1", "starts_at": utcnow() - timedelta(days=10),
+        },
+        {
+            "_id": "2025-1-Q", "season": 2025, "round": 1, "code": "Q",
+            "event_id": "2025-1", "starts_at": utcnow() - timedelta(days=10),
+        },
+    ])
+    counts = {"season": 0, "session": 0, "track": 0, "telemetry": 0, "backfill": 0}
+
+    schedule_historical_backfill(counts)
+
+    assert database.jobs.find_one({"key": "session:2025-1-R"})["priority"] == 20
+    assert database.jobs.find_one({"key": "session:2025-1-Q"}) is None

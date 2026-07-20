@@ -49,6 +49,31 @@ def current_session_due(session: dict, now: datetime) -> bool:
     return not synced or now - synced >= timedelta(hours=2)
 
 
+def historical_session_due(session_id: str) -> bool:
+    """Return whether a race is missing a completed core dataset marker."""
+    states = {
+        row.get("dataset"): row.get("availability")
+        for row in database.dataset_status.find(
+            {
+                "subject": session_id,
+                "dataset": {
+                    "$in": [
+                        "summary", "results", "laps", "strategy",
+                        "weather", "race-control",
+                    ],
+                },
+            },
+            {"dataset": 1, "availability": 1},
+        )
+    }
+    return any(
+        states.get(dataset) not in {"available", "unavailable"}
+        for dataset in (
+            "summary", "results", "laps", "strategy", "weather", "race-control",
+        )
+    )
+
+
 def schedule_historical_backfill(counts: dict[str, int]) -> None:
     # The dedicated archive runner owns historical work while active.  Avoid
     # duplicate queue traffic and concurrent FastF1 cache writes from the
@@ -67,8 +92,12 @@ def schedule_historical_backfill(counts: dict[str, int]) -> None:
     end = int(control.get("end", utcnow().year - 1) if control else utcnow().year - 1)
     include_telemetry = bool(control.get("include_telemetry", settings.telemetry_backfill_enabled) if control else settings.telemetry_backfill_enabled)
     missing_years = [year for year in range(end, max(1949, start - 1), -1) if not database.seasons.find_one({"_id": year})]
-    for year in missing_years[:2]:
-        queue_job(database, "season", f"season:{year}", {"season": year})
+    # Keep enough metadata work queued that the worker never waits for the
+    # next scheduler tick while filling the 1950-2025 archive.
+    for year in missing_years[:10]:
+        queue_job(
+            database, "season", f"season:{year}", {"season": year}, priority=30,
+        )
         counts["backfill"] += 1
 
     core_queued = 0
@@ -76,20 +105,26 @@ def schedule_historical_backfill(counts: dict[str, int]) -> None:
     telemetry_queued = 0
     track_events: set[str] = set()
     for year in range(end, max(1949, start - 1), -1):
-        for session in database.sessions.find({"season": year}).sort([("round", -1), ("starts_at", -1)]):
+        for session in database.sessions.find({"season": year, "code": "R"}).sort([("round", -1), ("starts_at", -1)]):
             starts = parse_datetime(session.get("starts_at"))
             if not starts or starts >= utcnow() - timedelta(hours=3):
                 continue
             session_id = session["_id"]
-            if core_queued < 10 and dataset_due(session_id, "summary"):
-                queue_job(database, "session", f"session:{session_id}", {"session_id": session_id})
+            if core_queued < 50 and historical_session_due(session_id):
+                queue_job(
+                    database, "session", f"session:{session_id}",
+                    {"session_id": session_id}, priority=20,
+                )
                 core_queued += 1
             circuit = find_circuit_for_session(database, session_id) if year >= 2018 else None
             event_id = str(session.get("event_id", ""))
             if (year >= 2018 and session.get("code") == "R" and track_queued < 2
                     and event_id not in track_events and not (circuit and circuit.get("map_data"))
                     and dataset_due(session_id, "track")):
-                queue_job(database, "track", f"track:{session_id}", {"session_id": session_id})
+                queue_job(
+                    database, "track", f"track:{session_id}",
+                    {"session_id": session_id}, priority=-20,
+                )
                 track_queued += 1
                 track_events.add(event_id)
             if (include_telemetry and year >= 2018 and telemetry_queued < 1
@@ -97,12 +132,12 @@ def schedule_historical_backfill(counts: dict[str, int]) -> None:
                 and dataset_due(session_id, "telemetry")):
                 queue_job(
                     database, "telemetry", f"telemetry:{session_id}",
-                    {"session_id": session_id}, priority=-10,
+                    {"session_id": session_id}, priority=-30,
                 )
                 telemetry_queued += 1
-            if core_queued >= 10 and track_queued >= 2 and (telemetry_queued >= 1 or not include_telemetry):
+            if core_queued >= 50 and (telemetry_queued >= 1 or not include_telemetry):
                 break
-        if core_queued >= 10 and track_queued >= 2 and (telemetry_queued >= 1 or not include_telemetry):
+        if core_queued >= 50 and (telemetry_queued >= 1 or not include_telemetry):
             break
     counts["session"] += core_queued
     counts["track"] += track_queued

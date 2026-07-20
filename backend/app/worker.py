@@ -89,6 +89,14 @@ def run_forever() -> None:
     init_mongo()
     recovered = recover_stale_jobs(database)
     adapter = FastF1Adapter(settings.fastf1_cache)
+    if settings.historical_backfill_enabled:
+        try:
+            dump = adapter.prepare_historical_dump()
+            logger.info(json.dumps({"event": "historical_dump.ready", **dump}, default=str))
+        except Exception:
+            # The worker can still use the paginated API while a later
+            # restart retries the faster verified bulk source.
+            logger.exception("Historical bulk source preparation failed")
     logger.info(json.dumps({
         "event": "worker.started", "database": settings.mongodb_database,
         "recovered_stale_jobs": recovered,

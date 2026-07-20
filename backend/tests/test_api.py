@@ -219,6 +219,39 @@ def test_telemetry_endpoint_returns_every_channel_by_default():
     assert data["traces"][0]["returned_point_count"] == 1
 
 
+def test_telemetry_endpoint_rebuilds_compact_merged_stream():
+    car = [
+        {"Time": 0, "Speed": 120, "RPM": 9000, "Throttle": 40, "Brake": False, "Gear": 4},
+        {"Time": 100, "Speed": 130, "RPM": 9500, "Throttle": 60, "Brake": True, "Gear": 5},
+    ]
+    position = [
+        {"Time": 0, "Distance": 0.0},
+        {"Time": 100, "Distance": 20.0},
+    ]
+    database.telemetry_laps.insert_one({
+        "_id": "2026-1-R:TST:1", "session_id": "2026-1-R", "driver": "TST",
+        "lap": 1, "lap_time": 90_000, "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "car_points_compressed": compress_telemetry_points(car),
+        "car_points_encoding": TELEMETRY_POINTS_ENCODING, "car_point_count": len(car),
+        "position_points_compressed": compress_telemetry_points(position),
+        "position_points_encoding": TELEMETRY_POINTS_ENCODING,
+        "position_point_count": len(position),
+    })
+    set_dataset_status(
+        database, "2026-1-R", "telemetry", "available", source="test",
+        schema_version=TELEMETRY_SCHEMA_VERSION,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/sessions/2026-1-R/telemetry?drivers=TST")
+
+    data = response.json()["data"]
+    assert data["available_channels"] == [
+        "Brake", "Distance", "Gear", "RPM", "Speed", "Throttle", "Time",
+    ]
+    assert data["traces"][0]["points"][1]["Distance"] == 20.0
+
+
 def test_session_driver_roster_returns_full_names_for_telemetry_dropdown():
     database.results.insert_many([
         {

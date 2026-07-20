@@ -58,7 +58,9 @@ def records(frame: pd.DataFrame, columns: list[str] | None = None) -> list[dict[
 
 
 TELEMETRY_POINTS_ENCODING = "zlib+bson-v1"
-TELEMETRY_SCHEMA_VERSION = 3
+TELEMETRY_SCHEMA_VERSION = 4
+COMPACT_CAR_CHANNELS = ("Time", "Speed", "RPM", "Throttle", "Brake", "Gear")
+COMPACT_POSITION_CHANNELS = ("Time", "Distance")
 # Level 3 keeps telemetry lossless while substantially reducing ingestion CPU
 # versus zlib's level-6 default.  A representative 44 MB sample compressed
 # 44% faster for only 3.4% more stored bytes, which is a better trade-off for
@@ -131,3 +133,79 @@ def telemetry_points(
     except (TypeError, ValueError, zlib.error):
         return []
     return decoded.get("points", [])
+
+
+def compact_car_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only the compact car channels selected for durable storage."""
+    compact = []
+    for point in points:
+        row = {}
+        for channel in COMPACT_CAR_CHANNELS:
+            source = "nGear" if channel == "Gear" else channel
+            if source in point:
+                row[channel] = point[source]
+            elif channel in point:
+                row[channel] = point[channel]
+        if row:
+            compact.append(row)
+    return compact
+
+
+def compact_distance_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep a lap-relative time/distance timeline for rebuilding chart traces."""
+    normalized = normalize_telemetry_distance(points)
+    return [
+        {channel: point[channel] for channel in COMPACT_POSITION_CHANNELS if channel in point}
+        for point in normalized
+        if "Time" in point and "Distance" in point
+    ]
+
+
+def compact_merged_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select the compact chart channels from an already merged source."""
+    normalized = normalize_telemetry_distance(points)
+    compact = []
+    for point in normalized:
+        car_rows = compact_car_points([point])
+        if not car_rows:
+            continue
+        row = car_rows[0]
+        if "Distance" in point:
+            row["Distance"] = point["Distance"]
+        compact.append(row)
+    return compact
+
+
+def merged_telemetry_points(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rebuild a compact merged trace from stored car and distance streams."""
+    # Read schema-v3 documents during a rolling migration.
+    legacy = telemetry_points(document)
+    if legacy and (
+        document.get("schema_version", 0) < 4
+        or not telemetry_points(document, "car")
+    ):
+        return legacy
+    car = telemetry_points(document, "car")
+    distance = telemetry_points(document, "position")
+    timed_distance = [
+        (point.get("Time"), point.get("Distance"))
+        for point in distance
+        if isinstance(point.get("Time"), (int, float))
+        and not isinstance(point.get("Time"), bool)
+        and isinstance(point.get("Distance"), (int, float))
+        and not isinstance(point.get("Distance"), bool)
+    ]
+    if not car:
+        return distance
+    if not timed_distance:
+        return [dict(point) for point in car]
+    times = np.asarray([item[0] for item in timed_distance], dtype=float)
+    distances = np.asarray([item[1] for item in timed_distance], dtype=float)
+    merged = []
+    for point in car:
+        row = dict(point)
+        point_time = point.get("Time")
+        if isinstance(point_time, (int, float)) and not isinstance(point_time, bool):
+            row["Distance"] = float(np.interp(float(point_time), times, distances))
+        merged.append(row)
+    return merged

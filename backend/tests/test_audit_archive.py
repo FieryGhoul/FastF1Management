@@ -58,72 +58,84 @@ def test_audit_proves_a_fully_recorded_historical_season():
 
 
 def test_audit_rejects_an_available_telemetry_status_without_rows():
-    set_dataset_status(database, "2025-1-Q", "telemetry", "available", source="test")
+    set_dataset_status(database, "2025-1-R", "telemetry", "available", source="test")
 
     result = audit(2025, 2025)
 
     assert result["complete"] is False
-    assert result["problems"]["telemetry_status_without_rows"] == ["2025-1-Q"]
+    assert result["problems"]["telemetry_status_without_rows"] == ["2025-1-R"]
 
 
 def test_audit_rejects_partial_telemetry_lap_coverage():
     database.laps.insert_many([
         {
-            "_id": "2025-1-Q:TST:1", "session_id": "2025-1-Q",
+            "_id": "2025-1-R:TST:1", "session_id": "2025-1-R",
             "Driver": "TST", "LapNumber": 1,
         },
         {
-            "_id": "2025-1-Q:TST:2", "session_id": "2025-1-Q",
+            "_id": "2025-1-R:TST:2", "session_id": "2025-1-R",
             "Driver": "TST", "LapNumber": 2,
         },
     ])
     database.telemetry_laps.insert_one({
-        "_id": "2025-1-Q:TST:1", "session_id": "2025-1-Q",
+        "_id": "2025-1-R:TST:1", "session_id": "2025-1-R",
         "schema_version": TELEMETRY_SCHEMA_VERSION,
     })
     set_dataset_status(
-        database, "2025-1-Q", "telemetry", "available", source="test",
+        database, "2025-1-R", "telemetry", "available", source="test",
         schema_version=TELEMETRY_SCHEMA_VERSION,
     )
 
     result = audit(2025, 2025)
 
     assert result["problems"]["telemetry_lap_count_errors"] == [
-        "2025-1-Q:timing=2:telemetry=1",
+        "2025-1-R:timing=2:telemetry=1",
+    ]
+
+
+def test_audit_flags_durable_non_race_telemetry():
+    database.telemetry_laps.insert_one({
+        "_id": "2025-1-Q:TST:1", "session_id": "2025-1-Q",
+    })
+
+    result = audit(2025, 2025)
+
+    assert result["problems"]["unexpected_non_race_telemetry_sessions"] == [
+        "2025-1-Q",
     ]
 
 
 def test_audit_rejects_wrong_telemetry_lap_identities():
     database.laps.insert_many([
         {
-            "_id": "2025-1-Q:TST:1", "session_id": "2025-1-Q",
+            "_id": "2025-1-R:TST:1", "session_id": "2025-1-R",
             "Driver": "TST", "LapNumber": 1,
         },
         {
-            "_id": "2025-1-Q:TST:2", "session_id": "2025-1-Q",
+            "_id": "2025-1-R:TST:2", "session_id": "2025-1-R",
             "Driver": "TST", "LapNumber": 2,
         },
     ])
     database.telemetry_laps.insert_many([
         {
-            "_id": "2025-1-Q:TST:1", "session_id": "2025-1-Q",
+            "_id": "2025-1-R:TST:1", "session_id": "2025-1-R",
             "driver": "TST", "lap": 1,
             "schema_version": TELEMETRY_SCHEMA_VERSION,
         },
         {
-            "_id": "2025-1-Q:TST:3", "session_id": "2025-1-Q",
+            "_id": "2025-1-R:TST:3", "session_id": "2025-1-R",
             "driver": "TST", "lap": 3,
             "schema_version": TELEMETRY_SCHEMA_VERSION,
         },
     ])
     set_dataset_status(
-        database, "2025-1-Q", "telemetry", "available", source="test",
+        database, "2025-1-R", "telemetry", "available", source="test",
         schema_version=TELEMETRY_SCHEMA_VERSION,
     )
 
     result = audit(2025, 2025)
 
-    assert result["problems"]["telemetry_lap_identity_errors"] == ["2025-1-Q"]
+    assert result["problems"]["telemetry_lap_identity_errors"] == ["2025-1-R"]
 
 
 def test_audit_rejects_obsolete_v3_artifacts():
@@ -207,24 +219,21 @@ def test_deep_audit_rejects_session_cumulative_telemetry_distance():
         {"Time": 1_000, "Distance": 5_500.0},
     ]
     database.telemetry_laps.insert_one({
-        "_id": "2025-1-Q:TST:2",
-        "session_id": "2025-1-Q",
+        "_id": "2025-1-R:TST:2",
+        "session_id": "2025-1-R",
         "schema_version": TELEMETRY_SCHEMA_VERSION,
         "distance_normalized": True,
-        "point_count": 2,
-        "points_encoding": TELEMETRY_POINTS_ENCODING,
-        "points_compressed": compress_telemetry_points(points),
-        "car_point_count": 0,
+        "car_point_count": 1,
         "car_points_encoding": TELEMETRY_POINTS_ENCODING,
-        "car_points_compressed": compress_telemetry_points([]),
-        "position_point_count": 0,
+        "car_points_compressed": compress_telemetry_points([{"Time": 0, "Speed": 200}]),
+        "position_point_count": 2,
         "position_points_encoding": TELEMETRY_POINTS_ENCODING,
-        "position_points_compressed": compress_telemetry_points([]),
+        "position_points_compressed": compress_telemetry_points(points),
     })
 
     result = audit(2025, 2025, deep=True)
 
     assert (
-        "2025-1-Q:TST:2:merged:distance_not_lap_relative"
+        "2025-1-R:TST:2:position:distance_not_lap_relative"
         in result["problems"]["telemetry_format_errors"]
     )

@@ -15,6 +15,7 @@ from app.serialization import (
     TELEMETRY_POINTS_ENCODING,
     TELEMETRY_SCHEMA_VERSION,
     compress_telemetry_points,
+    merged_telemetry_points,
     telemetry_points,
 )
 
@@ -152,15 +153,32 @@ def test_telemetry_ingestion_streams_compressed_laps():
 
     assert count == 51
     assert database.telemetry_laps.count_documents({"session_id": "2025-1-R"}) == 51
-    assert database.telemetry_laps.find_one({"session_id": "2025-1-R"})["points_compressed"]
     telemetry = database.telemetry_laps.find_one({"session_id": "2025-1-R"})
+    assert "points_compressed" not in telemetry
+    assert telemetry["car_points_compressed"]
+    assert telemetry["position_points_compressed"]
     assert telemetry["schema_version"] == TELEMETRY_SCHEMA_VERSION
     assert telemetry["distance_normalized"] is True
     assert telemetry["car_point_count"] == 1
     assert telemetry["position_point_count"] == 1
+    assert telemetry_points(telemetry, "car") == [{"Time": 0, "Speed": 101}]
+    assert telemetry_points(telemetry, "position") == [{"Time": 0, "Distance": 0.0}]
     assert database.dataset_status.find_one({
         "subject": "2025-1-R", "dataset": "telemetry",
     })["availability"] == "available"
+
+
+def test_persistent_telemetry_rejects_non_race_sessions():
+    class AdapterMustNotRun:
+        @staticmethod
+        def iter_session_telemetry_laps(_session_id):
+            raise AssertionError("non-race telemetry must remain on demand")
+
+    with pytest.raises(ValueError, match="restricted to race sessions"):
+        persist_telemetry(database, AdapterMustNotRun(), "2026-1-Q")
+
+    assert database.telemetry_laps.count_documents({}) == 0
+    assert database.dataset_status.count_documents({"dataset": "telemetry"}) == 0
 
 
 def test_interrupted_core_ingestion_cannot_leave_a_completed_marker():
@@ -286,7 +304,7 @@ def test_telemetry_ingestion_rejects_wrong_driver_lap_identities():
     })["availability"] == "awaiting_data"
 
 
-def test_telemetry_migration_repairs_cumulative_distance_without_touching_raw_streams():
+def test_telemetry_migration_compacts_streams_and_removes_merged_blob():
     merged = [
         {"Time": 0, "Distance": 5_000.0, "RelativeDistance": 0.4},
         {"Time": 1_000, "Distance": 5_500.0, "RelativeDistance": 0.5},
@@ -312,8 +330,10 @@ def test_telemetry_migration_repairs_cumulative_distance_without_touching_raw_st
     document = database.telemetry_laps.find_one({"_id": "2025-1-R:TST:2"})
 
     assert result == {"migrated": 1, "failed": 0, "sessions": 1}
-    assert [point["Distance"] for point in telemetry_points(document)] == [0.0, 500.0]
+    assert "points_compressed" not in document
+    assert [point["Distance"] for point in telemetry_points(document, "position")] == [0.0, 500.0]
     assert telemetry_points(document, "car") == raw_car
+    assert [point["Distance"] for point in merged_telemetry_points(document)] == [0.0]
     assert document["schema_version"] == TELEMETRY_SCHEMA_VERSION
     assert database.dataset_status.find_one({
         "subject": "2025-1-R", "dataset": "telemetry",

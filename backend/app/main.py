@@ -17,7 +17,11 @@ from .contracts import artifact_key
 from .mongo import database, get_db, init_mongo, public_document, queue_job, utcnow
 from .on_demand import OnDemandArtifactCache
 from .security import COOKIE_NAME, authenticate, create_session, ensure_admin, get_admin, require_csrf
-from .serialization import TELEMETRY_SCHEMA_VERSION, telemetry_points
+from .serialization import (
+    TELEMETRY_SCHEMA_VERSION,
+    merged_telemetry_points,
+    telemetry_points,
+)
 
 
 settings = get_settings()
@@ -423,7 +427,7 @@ def telemetry(
     if telemetry_state.get("schema_version") != TELEMETRY_SCHEMA_VERSION:
         return {
             "availability": "awaiting_data",
-            "unavailable_reason": "Telemetry is being upgraded to the complete raw-stream schema.",
+            "unavailable_reason": "Telemetry is being upgraded to the compact two-stream schema.",
             "data": None,
             "source": "MongoDB",
         }
@@ -438,7 +442,6 @@ def telemetry(
     if not requested_drivers:
         fastest = db.telemetry_laps.find_one({"session_id": session_id, "lap_time": {"$ne": None}}, sort=[("lap_time", ASCENDING)])
         requested_drivers = [fastest["driver"]] if fastest else []
-    point_stream = None if stream == "merged" else stream
     traces = []
     available_channels: set[str] = set()
     for code in requested_drivers:
@@ -450,7 +453,11 @@ def telemetry(
         )
         if not document:
             continue
-        points = telemetry_points(document, point_stream)
+        points = (
+            merged_telemetry_points(document)
+            if stream == "merged"
+            else telemetry_points(document, stream)
+        )
         for point in points:
             available_channels.update(point.keys())
         stride = max(1, int(np.ceil(len(points) / 1500)))
@@ -460,7 +467,7 @@ def telemetry(
                 list(point.keys())
                 if return_all_channels
                 else list(dict.fromkeys([
-                    "Distance", "Time", "SessionTime", "X", "Y", "Z",
+                    "Distance", "Time",
                     *requested_channels,
                 ]))
             )

@@ -8,6 +8,16 @@ from typing import Any
 
 ARTIFACT_VERSION = "v4"
 ARCHIVE_SCHEMA_VERSION = 4
+PERSISTENT_TELEMETRY_SESSION_CODES = frozenset({"R"})
+
+
+def stores_persistent_telemetry(
+    session_id: str,
+    code: str | None = None,
+) -> bool:
+    """Return whether this session belongs in durable telemetry storage."""
+    session_code = code or session_id.rsplit("-", 1)[-1]
+    return str(session_code).upper() in PERSISTENT_TELEMETRY_SESSION_CODES
 
 
 def artifact_key(session_id: str, kind: str, options: dict[str, Any]) -> str:

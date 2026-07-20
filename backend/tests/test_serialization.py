@@ -3,7 +3,17 @@ from datetime import datetime, time, timedelta, timezone
 import numpy as np
 import pandas as pd
 
-from app.serialization import clean, normalize_telemetry_distance, records
+from app.serialization import (
+    clean,
+    compact_car_points,
+    compact_distance_points,
+    compress_telemetry_points,
+    merged_telemetry_points,
+    normalize_telemetry_distance,
+    records,
+    TELEMETRY_POINTS_ENCODING,
+    TELEMETRY_SCHEMA_VERSION,
+)
 
 
 def test_clean_converts_pandas_and_numpy_values():
@@ -76,3 +86,29 @@ def test_telemetry_distance_can_normalize_owned_points_in_place():
         {"Distance": 0.0, "RelativeDistance": 0.0},
         {"Distance": 250.0, "RelativeDistance": 1.0},
     ]
+
+
+def test_compact_telemetry_keeps_only_selected_channels_and_rebuilds_distance():
+    source = [
+        {"Time": 0, "Distance": 5000.0, "Speed": 100, "RPM": 9000,
+         "Throttle": 50, "Brake": False, "nGear": 4, "DRS": 1, "X": 10},
+        {"Time": 1000, "Distance": 5250.0, "Speed": 110, "RPM": 9500,
+         "Throttle": 60, "Brake": True, "nGear": 5, "DRS": 0, "X": 20},
+    ]
+    car = compact_car_points(source)
+    position = compact_distance_points(source)
+    document = {
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "car_points_encoding": TELEMETRY_POINTS_ENCODING,
+        "car_points_compressed": compress_telemetry_points(car),
+        "position_points_encoding": TELEMETRY_POINTS_ENCODING,
+        "position_points_compressed": compress_telemetry_points(position),
+    }
+
+    assert set(car[0]) == {"Time", "Speed", "RPM", "Throttle", "Brake", "Gear"}
+    assert car[0]["Gear"] == 4
+    assert position == [
+        {"Time": 0, "Distance": 0.0},
+        {"Time": 1000, "Distance": 250.0},
+    ]
+    assert merged_telemetry_points(document)[1]["Distance"] == 250.0

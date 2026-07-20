@@ -1696,9 +1696,9 @@ export function SessionPage() {
                 }
               }}
             >
-              <option value="merged">Merged lap</option>
-              <option value="car">Raw car data</option>
-              <option value="position">Raw position data</option>
+              <option value="merged">Rebuilt merged lap</option>
+              <option value="car">Compact car data</option>
+              <option value="position">Time / distance data</option>
             </select>
           </label>
           <label>
@@ -1712,12 +1712,10 @@ export function SessionPage() {
             />
             <datalist id="telemetry-channel-presets">
               <option value="all" />
-              <option value="Speed,RPM,Throttle,Brake,nGear,DRS" />
+              <option value="Time,Distance,Speed,RPM,Throttle,Brake,Gear" />
               <option value="Speed,Throttle,Brake" />
-              <option value="Speed,RPM,nGear" />
-              <option value="X,Y,Z,Status" />
-              <option value="X,Y" />
-              <option value="Z,Status" />
+              <option value="Speed,RPM,Gear" />
+              <option value="Time,Distance" />
             </datalist>
           </label>
           <label>
@@ -1733,8 +1731,7 @@ export function SessionPage() {
                   "RPM",
                   "Throttle",
                   "Brake",
-                  "nGear",
-                  "DRS",
+                  "Gear",
                 ]
               ).map((channel: string) => (
                 <option key={channel}>{channel}</option>

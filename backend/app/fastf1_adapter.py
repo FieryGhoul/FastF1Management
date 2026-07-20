@@ -14,7 +14,13 @@ from fastf1.ergast import Ergast
 
 from .contracts import ARTIFACT_VERSION, artifact_key
 from .jolpica_dump import HISTORICAL_DUMP_SCHEMA_VERSION, JolpicaDump
-from .serialization import clean, records
+from .serialization import (
+    clean,
+    compact_car_points,
+    compact_distance_points,
+    compact_merged_points,
+    records,
+)
 
 
 SESSION_CODES = {
@@ -684,33 +690,44 @@ class FastF1Adapter:
             lap_choice = options.get("laps", "fastest")
             lap = laps.pick_fastest() if lap_choice == "fastest" else laps[laps["LapNumber"] == int(lap_choice)].iloc[0]
             if stream == "car":
-                telemetry = lap.get_car_data()
+                source = lap.get_car_data()
+                points = compact_car_points(records(source, list(source.columns)))
             elif stream == "position":
-                telemetry = lap.get_pos_data()
+                source = lap.get_telemetry()
+                if "Distance" not in source.columns:
+                    source = source.add_distance()
+                points = compact_distance_points(records(source, list(source.columns)))
             else:
-                telemetry = lap.get_telemetry()
-            if stream == "merged" and "Distance" not in telemetry.columns:
-                telemetry = telemetry.add_distance()
-            available_channels.update(str(column) for column in telemetry.columns)
+                source = lap.get_telemetry()
+                if "Distance" not in source.columns:
+                    source = source.add_distance()
+                points = compact_merged_points(records(source, list(source.columns)))
+            point_channels = list(dict.fromkeys(
+                key for point in points for key in point
+            ))
+            available_channels.update(point_channels)
             allowed = (
-                list(telemetry.columns)
+                point_channels
                 if return_all_channels
-                else [column for column in requested if column in telemetry.columns]
+                else [column for column in requested if column in point_channels]
             )
-            stride = max(1, int(np.ceil(len(telemetry) / 1500)))
+            stride = max(1, int(np.ceil(len(points) / 1500)))
             columns = list(dict.fromkeys([
                 column
                 for column in (
-                    "Distance", "Time", "SessionTime", "X", "Y", "Z", *allowed,
+                    "Distance", "Time", *allowed,
                 )
-                if column in telemetry.columns
+                if column in point_channels
             ]))
-            sampled = telemetry.iloc[::stride]
+            sampled = points[::stride]
             traces.append({"driver": driver, "lap": clean(lap.get("LapNumber")),
                            "lap_time": clean(lap.get("LapTime")),
-                           "point_count": len(telemetry),
+                           "point_count": len(points),
                            "returned_point_count": len(sampled),
-                           "points": records(sampled, columns)})
+                           "points": [
+                               {key: point[key] for key in columns if key in point}
+                               for point in sampled
+                           ]})
         returned_channels = (
             sorted(available_channels)
             if return_all_channels

@@ -17,14 +17,17 @@ The API process never calls FastF1 or Jolpica. It returns data already stored in
 
 MongoDB collections cover seasons, events, sessions, drivers, constructors, circuits, standings, results, laps, strategies, weather, race-control messages, per-lap telemetry, derived artifacts, dataset freshness, ingestion jobs, admin users and admin sessions.
 
-Telemetry is stored as one document per driver lap with three losslessly
-compressed streams: the merged trace used by charts, original car data and
-original position data. Merged `Distance` and `RelativeDistance` are normalized
-per lap so every comparison starts at zero, while both raw streams stay
-untouched. Browser responses select the requested lap, downsample
+Race-session telemetry is stored durably as one document per driver lap with
+two compressed compact streams: car data (`Time`, `Speed`, `RPM`, `Throttle`,
+`Brake`, `Gear`) and a lap-relative `Time`/`Distance` timeline. The redundant
+merged stream and all other telemetry channels are discarded; chart traces are
+rebuilt from the two compact streams when requested. Practice, qualifying and
+sprint telemetry is loaded into the bounded on-demand cache and is not written
+to MongoDB. Browser responses select the requested lap, downsample
 each trace to at most 1,500 points and calculate two-driver delta from stored
 samples. Use `stream=merged`, `stream=car` or `stream=position` on the telemetry
-API to select a source stream. Canonical circuit maps are stored once on the
+API to select the rebuilt trace, compact car stream, or time/distance stream.
+Canonical circuit maps are stored once on the
 circuit and reused for historical sessions that do not have position data.
 
 ## Run locally
@@ -110,7 +113,7 @@ data migration, historical backfill and production verification.
 - Detailed session ingestion starts at least 30 minutes after the expected end.
 - Failed jobs retry twice with exponential delay before becoming operator-visible failures.
 - Historical season backfill is controlled by `HISTORICAL_BACKFILL_ENABLED` or the Operations page.
-- Telemetry backfill is controlled by `TELEMETRY_BACKFILL_ENABLED` because a full 2018-present archive is large and slow.
+- Race-only telemetry backfill is controlled by `TELEMETRY_BACKFILL_ENABLED` because raw timing archives are large and slow.
 
 For an operator-requested, resumable archive load that should run independently
 of the normal queue, stop the worker and scheduler and run:
@@ -131,13 +134,29 @@ cd backend
 
 This stores schedules, participants, round-by-round standings, published
 classifications, historical race laps and available pit stops for 2000 onward.
-FastF1 car/position streams, weather, race control and full session timing are
-stored for completed sessions from 2018 onward, which is the raw timing-data
-boundary. Progress and retryable failures are checkpointed in MongoDB so the
+FastF1 weather, race control and full session timing are stored for completed
+sessions from 2018 onward; durable car/position telemetry is restricted to race
+sessions. Progress and retryable failures are checkpointed in MongoDB so the
 command can be safely rerun. The dedicated timing runner removes only a
 session's exact FastF1 staging-cache directory after its schema-versioned raw
 streams have been verified in MongoDB; this keeps the complete archive from
 duplicating tens of gigabytes on disk.
+
+Preview and then apply the race-only retention policy to an existing database:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m app.telemetry_retention
+.\.venv\Scripts\python.exe -m app.telemetry_retention --apply
+```
+
+Preview and then compact existing race telemetry into the two-stream schema:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m app.telemetry_compaction
+.\.venv\Scripts\python.exe -m app.telemetry_compaction --apply
+```
 
 For historical timing, the archive command automatically downloads Jolpica's
 official free delayed CSV database dump, verifies its published SHA-256 hash,

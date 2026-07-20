@@ -9,11 +9,13 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
-from .contracts import ARCHIVE_SCHEMA_VERSION, artifact_key
+from .contracts import ARCHIVE_SCHEMA_VERSION, artifact_key, stores_persistent_telemetry
 from .config import get_settings
 from .jolpica_dump import HISTORICAL_DUMP_SCHEMA_VERSION, JolpicaDump
 from .mongo import database, init_mongo, utcnow
 from .serialization import (
+    COMPACT_CAR_CHANNELS,
+    COMPACT_POSITION_CHANNELS,
     TELEMETRY_POINTS_ENCODING,
     TELEMETRY_SCHEMA_VERSION,
     telemetry_points,
@@ -105,7 +107,10 @@ def audit(start: int, end: int, *, deep: bool = False) -> dict[str, Any]:
     missing_session_datasets = [
         f"{row['_id']}:{dataset}"
         for row in sessions
-        for dataset in (*CORE_DATASETS, "telemetry")
+        for dataset in (
+            *CORE_DATASETS,
+            *(("telemetry",) if stores_persistent_telemetry(row["_id"], row.get("code")) else ()),
+        )
         if (row["_id"], dataset) not in statuses
     ]
     unavailable_modern_session_datasets = [
@@ -227,16 +232,22 @@ def audit(start: int, end: int, *, deep: bool = False) -> dict[str, Any]:
         str(subject) for subject in database.telemetry_laps.distinct("session_id")
         if subject_in_range(str(subject))
     }
+    unexpected_non_race_telemetry_sessions = sorted(
+        session_id for session_id in telemetry_session_ids
+        if not stores_persistent_telemetry(session_id)
+    )
     telemetry_scope = {"session_id": {"$in": list(telemetry_session_ids)}}
     available_telemetry = {
         subject for (subject, dataset), availability in statuses.items()
         if dataset == "telemetry"
         and availability == "available"
         and subject_in_range(subject)
+        and stores_persistent_telemetry(subject)
     }
     telemetry_status_without_rows = sorted(available_telemetry - telemetry_session_ids)
     telemetry_rows_without_status = sorted(
         session_id for session_id in telemetry_session_ids
+        if stores_persistent_telemetry(session_id)
         if statuses.get((session_id, "telemetry")) != "available"
     )
     telemetry_lap_count_errors = []
@@ -267,6 +278,7 @@ def audit(start: int, end: int, *, deep: bool = False) -> dict[str, Any]:
             telemetry_lap_identity_errors.append(session_id)
     stale_telemetry_schemas = sorted(
         session_id for session_id in session_ids
+        if stores_persistent_telemetry(session_id)
         if (session_id, "telemetry") in status_documents
         and status_documents[(session_id, "telemetry")].get("schema_version")
         != TELEMETRY_SCHEMA_VERSION
@@ -341,8 +353,6 @@ def audit(start: int, end: int, *, deep: bool = False) -> dict[str, Any]:
         telemetry_scope, {
             "session_id": 1,
             "schema_version": 1,
-            "point_count": 1,
-            "points_encoding": 1,
             "car_point_count": 1,
             "car_points_encoding": 1,
             "position_point_count": 1,
@@ -355,26 +365,40 @@ def audit(start: int, end: int, *, deep: bool = False) -> dict[str, Any]:
             telemetry_format_errors.append(f"{document['_id']}:invalid_schema_version")
         if document.get("distance_normalized") is not True:
             telemetry_format_errors.append(f"{document['_id']}:distance_not_normalized")
-        for stream in (None, "car", "position"):
-            prefix = f"{stream}_" if stream else ""
-            label = stream or "merged"
+        for stream in ("car", "position"):
+            prefix = f"{stream}_"
+            label = stream
             if document.get(f"{prefix}points_encoding") != TELEMETRY_POINTS_ENCODING:
                 telemetry_format_errors.append(f"{document['_id']}:{label}:invalid_encoding")
             count = document.get(f"{prefix}point_count")
-            minimum = 1 if stream is None else 0
+            minimum = 1
             if not isinstance(count, int) or count < minimum:
                 telemetry_format_errors.append(f"{document['_id']}:{label}:invalid_point_count")
             if deep:
                 points = telemetry_points(document, stream)
                 if len(points) != count:
                     telemetry_format_errors.append(f"{document['_id']}:{label}:point_count_mismatch")
-                if stream is None and points and not all(
+                if stream == "position" and points and not all(
                     "Time" in point and "Distance" in point for point in points
                 ):
                     telemetry_format_errors.append(
                         f"{document['_id']}:{label}:missing_time_or_distance"
                     )
-                if stream is None and points:
+                allowed_channels = (
+                    set(COMPACT_CAR_CHANNELS)
+                    if stream == "car"
+                    else set(COMPACT_POSITION_CHANNELS)
+                )
+                unexpected_channels = sorted({
+                    key for point in points for key in point
+                    if key not in allowed_channels
+                })
+                if unexpected_channels:
+                    telemetry_format_errors.append(
+                        f"{document['_id']}:{label}:unexpected_channels="
+                        f"{','.join(unexpected_channels)}"
+                    )
+                if stream == "position" and points:
                     distances = [
                         float(point["Distance"])
                         for point in points
@@ -407,6 +431,7 @@ def audit(start: int, end: int, *, deep: bool = False) -> dict[str, Any]:
         "missing_maps": missing_maps,
         "missing_circuit_metadata": missing_circuit_metadata,
         "missing_event_circuit_links": missing_event_circuit_links,
+        "unexpected_non_race_telemetry_sessions": unexpected_non_race_telemetry_sessions,
         "telemetry_status_without_rows": telemetry_status_without_rows,
         "telemetry_rows_without_status": telemetry_rows_without_status,
         "telemetry_lap_count_errors": telemetry_lap_count_errors,

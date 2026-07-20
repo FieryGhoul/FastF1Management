@@ -17,6 +17,15 @@ from pymongo import MongoClient, ReplaceOne
 
 def season_queries(season: int, include_telemetry: bool) -> list[tuple[str, dict[str, Any]]]:
     session_prefix = f"^{season}-"
+    race_session_pattern = f"^{season}-.*-R$"
+    session_status_scope: list[dict[str, Any]] = [
+        {"subject": {"$regex": session_prefix}, "dataset": {"$ne": "telemetry"}},
+    ]
+    if include_telemetry:
+        session_status_scope.append({
+            "subject": {"$regex": race_session_pattern},
+            "dataset": "telemetry",
+        })
     queries: list[tuple[str, dict[str, Any]]] = [
         ("seasons", {"_id": season}),
         ("events", {"season": season}),
@@ -36,14 +45,14 @@ def season_queries(season: int, include_telemetry: bool) -> list[tuple[str, dict
             {
                 "$or": [
                     {"subject": str(season)},
-                    {"subject": {"$regex": session_prefix}},
+                    *session_status_scope,
                 ]
             },
         ),
     ]
     if include_telemetry:
         queries.append(
-            ("telemetry_laps", {"session_id": {"$regex": session_prefix}})
+            ("telemetry_laps", {"session_id": {"$regex": race_session_pattern}})
         )
     return queries
 

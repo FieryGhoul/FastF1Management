@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 from .backfill import ArchiveBackfill
-from .contracts import artifact_key
+from .contracts import artifact_key, stores_persistent_telemetry
 from .ingestion import migrate_telemetry_schema
 from .mongo import database, init_mongo, utcnow
 from .serialization import TELEMETRY_SCHEMA_VERSION
@@ -51,20 +51,22 @@ class ModernTimingBackfill(ArchiveBackfill):
             "_id", {"session_id": {"$in": session_ids}},
         ))
         gaps = []
-        for session_id in session_ids:
+        for session in sessions:
+            session_id = session["_id"]
             for dataset in CORE_DATASETS:
                 state = statuses.get((session_id, dataset)) or {}
                 if state.get("availability") != "available":
                     gaps.append(f"{session_id}:{dataset}")
                 elif artifact_key(session_id, dataset, {}) not in artifact_ids:
                     gaps.append(f"{session_id}:{dataset}:artifact")
-            telemetry_state = statuses.get((session_id, "telemetry")) or {}
-            if (
-                telemetry_state.get("availability") not in {"available", "unavailable"}
-                or telemetry_state.get("schema_version") != TELEMETRY_SCHEMA_VERSION
-                or not ModernTimingBackfill.telemetry_recorded(session_id)
-            ):
-                gaps.append(f"{session_id}:telemetry")
+            if stores_persistent_telemetry(session_id, session.get("code")):
+                telemetry_state = statuses.get((session_id, "telemetry")) or {}
+                if (
+                    telemetry_state.get("availability") not in {"available", "unavailable"}
+                    or telemetry_state.get("schema_version") != TELEMETRY_SCHEMA_VERSION
+                    or not ModernTimingBackfill.telemetry_recorded(session_id)
+                ):
+                    gaps.append(f"{session_id}:telemetry")
         return gaps
 
     def run_timing(self) -> int:

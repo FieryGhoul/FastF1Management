@@ -76,3 +76,17 @@ def test_timing_coverage_rejects_unavailable_core_dataset():
     )
 
     assert ModernTimingBackfill.coverage_gaps([session]) == ["2025-1-Q:results"]
+
+
+def test_timing_coverage_does_not_require_qualifying_telemetry():
+    session = {
+        "_id": "2025-1-Q", "season": 2025, "round": 1, "code": "Q",
+    }
+    for dataset in CORE_DATASETS:
+        set_dataset_status(database, session["_id"], dataset, "available", source="test")
+        database.artifacts.insert_one({
+            "_id": artifact_key(session["_id"], dataset, {}),
+            "session_id": session["_id"], "kind": dataset,
+        })
+
+    assert ModernTimingBackfill.coverage_gaps([session]) == []

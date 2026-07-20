@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from .config import get_settings
+from .contracts import stores_persistent_telemetry
 from .ingestion import find_circuit_for_session
 from .mongo import database, init_mongo, queue_job, utcnow
 
@@ -91,7 +92,9 @@ def schedule_historical_backfill(counts: dict[str, int]) -> None:
                 queue_job(database, "track", f"track:{session_id}", {"session_id": session_id})
                 track_queued += 1
                 track_events.add(event_id)
-            if include_telemetry and year >= 2018 and telemetry_queued < 1 and dataset_due(session_id, "telemetry"):
+            if (include_telemetry and year >= 2018 and telemetry_queued < 1
+                    and stores_persistent_telemetry(session_id, session.get("code"))
+                    and dataset_due(session_id, "telemetry")):
                 queue_job(database, "telemetry", f"telemetry:{session_id}", {"session_id": session_id})
                 telemetry_queued += 1
             if core_queued >= 10 and track_queued >= 2 and (telemetry_queued >= 1 or not include_telemetry):
@@ -139,7 +142,10 @@ def schedule_once() -> dict[str, int]:
             queue_job(database, "track", f"track:{session_id}", {"session_id": session_id})
             counts["track"] += 1
             track_events.add(event_id)
-        if settings.telemetry_backfill_enabled and counts["telemetry"] == 0 and int(session.get("season", 0)) >= 2018 and dataset_due(session_id, "telemetry"):
+        if (settings.telemetry_backfill_enabled and counts["telemetry"] == 0
+                and int(session.get("season", 0)) >= 2018
+                and stores_persistent_telemetry(session_id, session.get("code"))
+                and dataset_due(session_id, "telemetry")):
             queue_job(database, "telemetry", f"telemetry:{session_id}", {"session_id": session_id})
             counts["telemetry"] += 1
 

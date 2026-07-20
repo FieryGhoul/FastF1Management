@@ -2,20 +2,23 @@ import hashlib
 import json
 import re
 from collections import Counter
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
+from pymongo import UpdateOne
 from pymongo.database import Database
 
 from .circuit_matching import circuit_match_score, country_variants
-from .contracts import ARCHIVE_SCHEMA_VERSION
+from .contracts import ARCHIVE_SCHEMA_VERSION, stores_persistent_telemetry
 from .fastf1_adapter import FastF1Adapter, slugify
 from .mongo import set_dataset_status, utcnow
 from .serialization import (
     TELEMETRY_POINTS_ENCODING,
     TELEMETRY_SCHEMA_VERSION,
+    compact_car_points,
+    compact_distance_points,
     compress_telemetry_points,
-    normalize_telemetry_distance,
     telemetry_points,
 )
 
@@ -349,6 +352,10 @@ def persist_track(db: Database, adapter: FastF1Adapter, session_id: str) -> dict
 
 
 def persist_telemetry(db: Database, adapter: FastF1Adapter, session_id: str) -> int:
+    if not stores_persistent_telemetry(session_id):
+        raise ValueError(
+            f"Persistent telemetry is restricted to race sessions: {session_id}",
+        )
     # Invalidate the previous completion marker before replacing any rows.
     # If the process is interrupted between batches, the next run must rebuild
     # the session instead of accepting a partial set of schema-current rows.
@@ -377,12 +384,16 @@ def persist_telemetry(db: Database, adapter: FastF1Adapter, session_id: str) -> 
         )
         item["_id"] = f"{session_id}:{item.get('driver')}:{item.get('lap')}"
         item["updated_at"] = utcnow()
+        merged_points = item.pop("points", [])
+        car_points = compact_car_points(item.pop("car_points", []) or merged_points)
+        # The original X/Y/Z position rows are intentionally discarded. The
+        # compact position stream retains only the time/distance index needed
+        # to reconstruct distance-based charts.
+        item.pop("position_points", None)
+        position_points = compact_distance_points(merged_points)
         counts = {}
-        for stream in (None, "car", "position"):
-            prefix = f"{stream}_" if stream else ""
-            points = item.pop(f"{prefix}points", [])
-            if stream is None:
-                points = normalize_telemetry_distance(points, copy_points=False)
+        for stream, points in (("car", car_points), ("position", position_points)):
+            prefix = f"{stream}_"
             item[f"{prefix}points_compressed"] = compress_telemetry_points(points)
             item[f"{prefix}points_encoding"] = TELEMETRY_POINTS_ENCODING
             item[f"{prefix}point_count"] = len(points)
@@ -430,55 +441,99 @@ def persist_telemetry(db: Database, adapter: FastF1Adapter, session_id: str) -> 
     return count
 
 
-def migrate_telemetry_schema(db: Database) -> dict[str, int]:
-    """Upgrade stored telemetry to lap-relative distance without refetching.
-
-    The compressed raw car and position streams are already lossless.  Only
-    the derived merged stream needs rewriting, which makes this migration much
-    cheaper and safer than downloading every completed session again.
-    """
+def migrate_telemetry_schema(
+    db: Database,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, int]:
+    """Convert older telemetry to compact car plus time/distance streams."""
     migrated = 0
     failed = 0
     sessions: set[str] = set()
     query = {
         "$or": [
             {"schema_version": {"$ne": TELEMETRY_SCHEMA_VERSION}},
-            {"distance_normalized": {"$ne": True}},
+            {"points_compressed": {"$exists": True}},
+            {"points": {"$exists": True}},
         ]
     }
     projection = {
         "session_id": 1,
-        "point_count": 1,
-        "points_encoding": 1,
-        "points_compressed": 1,
+        "schema_version": 1,
+        "points": 1, "points_encoding": 1, "points_compressed": 1,
+        "car_points": 1, "car_points_encoding": 1, "car_points_compressed": 1,
+        "position_points": 1, "position_points_encoding": 1,
+        "position_points_compressed": 1,
     }
+    total = db.telemetry_laps.count_documents(query)
+    updates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    def flush_updates() -> None:
+        nonlocal updates
+        if not updates:
+            return
+        try:
+            db.telemetry_laps.bulk_write(
+                [UpdateOne(selector, update) for selector, update in updates],
+                ordered=False,
+            )
+        except TypeError:
+            # mongomock can lag PyMongo's UpdateOne signature. Keep tests and
+            # local mock workflows compatible without slowing real MongoDB.
+            for selector, update in updates:
+                db.telemetry_laps.update_one(selector, update)
+        updates = []
+
     for document in db.telemetry_laps.find(query, projection):
-        points = telemetry_points(document)
-        expected = document.get("point_count")
-        if expected and len(points) != expected:
+        merged = telemetry_points(document)
+        car = telemetry_points(document, "car") or merged
+        compact_car = compact_car_points(car)
+        compact_position = compact_distance_points(merged)
+        if not compact_car or not compact_position:
             failed += 1
             continue
-        normalized = normalize_telemetry_distance(points, copy_points=False)
-        db.telemetry_laps.update_one(
-            {"_id": document["_id"]},
-            {"$set": {
-                "points_compressed": compress_telemetry_points(normalized),
-                "points_encoding": TELEMETRY_POINTS_ENCODING,
-                "point_count": len(normalized),
-                "schema_version": TELEMETRY_SCHEMA_VERSION,
-                "distance_normalized": True,
-                "updated_at": utcnow(),
-            }},
-        )
+        updates.append((
+            {"_id": document["_id"]}, {
+                "$set": {
+                    "car_points_compressed": compress_telemetry_points(compact_car),
+                    "car_points_encoding": TELEMETRY_POINTS_ENCODING,
+                    "car_point_count": len(compact_car),
+                    "position_points_compressed": compress_telemetry_points(compact_position),
+                    "position_points_encoding": TELEMETRY_POINTS_ENCODING,
+                    "position_point_count": len(compact_position),
+                    "schema_version": TELEMETRY_SCHEMA_VERSION,
+                    "distance_normalized": True,
+                    "updated_at": utcnow(),
+                },
+                "$unset": {
+                    "points": "", "points_compressed": "", "points_encoding": "",
+                    "point_count": "", "car_points": "", "position_points": "",
+                },
+            },
+        ))
         sessions.add(str(document.get("session_id")))
         migrated += 1
+        if len(updates) >= 100:
+            flush_updates()
+        if progress and (migrated + failed) % 250 == 0:
+            progress(
+                f"telemetry laps: {migrated + failed}/{total}; "
+                f"compacted: {migrated}; failed: {failed}",
+            )
+    flush_updates()
+    if progress and total:
+        progress(
+            f"telemetry laps: {migrated + failed}/{total}; "
+            f"compacted: {migrated}; failed: {failed}",
+        )
 
     for session_id in sessions:
         if db.telemetry_laps.count_documents({
             "session_id": session_id,
             "$or": [
                 {"schema_version": {"$ne": TELEMETRY_SCHEMA_VERSION}},
-                {"distance_normalized": {"$ne": True}},
+                {"points_compressed": {"$exists": True}},
+                {"points": {"$exists": True}},
             ],
         }) == 0:
             db.dataset_status.update_one(

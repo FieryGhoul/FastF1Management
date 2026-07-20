@@ -20,7 +20,7 @@ from typing import Any, TypeVar
 
 from .circuit_catalog import sync_catalog_maps, sync_f1db_maps, sync_f1db_metadata
 from .config import get_settings
-from .contracts import ARCHIVE_SCHEMA_VERSION, artifact_key
+from .contracts import ARCHIVE_SCHEMA_VERSION, artifact_key, stores_persistent_telemetry
 from .fastf1_adapter import FastF1Adapter
 from .ingestion import (
     find_circuit_for_session,
@@ -176,9 +176,10 @@ class ArchiveBackfill:
                 "$or": [
                     {"schema_version": {"$ne": TELEMETRY_SCHEMA_VERSION}},
                     {"distance_normalized": {"$ne": True}},
-                    {"points_encoding": {"$ne": TELEMETRY_POINTS_ENCODING}},
                     {"car_points_encoding": {"$ne": TELEMETRY_POINTS_ENCODING}},
                     {"position_points_encoding": {"$ne": TELEMETRY_POINTS_ENCODING}},
+                    {"points_compressed": {"$exists": True}},
+                    {"points": {"$exists": True}},
                 ],
             }) == 0
         )
@@ -320,11 +321,16 @@ class ArchiveBackfill:
                 # but pre-2018 sessions still need an explicit schema-versioned
                 # unavailable record.  Otherwise a --without-telemetry archive
                 # can never pass the completeness audit.
-                (year < 2018 or self.include_telemetry)
+                stores_persistent_telemetry(session_id, row.get("code"))
+                and (year < 2018 or self.include_telemetry)
                 and not self.telemetry_recorded(session_id)
             )
+            telemetry_complete = (
+                not stores_persistent_telemetry(session_id, row.get("code"))
+                or self.telemetry_recorded(session_id)
+            )
             if not any((needs_core, needs_track, needs_telemetry)):
-                if self.prune_fastf1_cache and year >= 2018 and self.telemetry_recorded(session_id):
+                if self.prune_fastf1_cache and year >= 2018 and telemetry_complete:
                     try:
                         pruned = self.adapter.prune_session_cache(session_id)
                         if pruned["files"]:
@@ -375,7 +381,10 @@ class ArchiveBackfill:
                     self.counts["telemetry_laps"] += result
                     logger.info("telemetry session=%s laps=%d", session_id, result)
 
-            if self.prune_fastf1_cache and self.telemetry_recorded(session_id):
+            if self.prune_fastf1_cache and (
+                not stores_persistent_telemetry(session_id, row.get("code"))
+                or self.telemetry_recorded(session_id)
+            ):
                 try:
                     pruned = self.adapter.prune_session_cache(session_id)
                     if pruned["files"]:

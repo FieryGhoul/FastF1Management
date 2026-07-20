@@ -1018,6 +1018,48 @@ tbody tr:hover {
 .trace-meta .metric {
   flex: 1;
 }
+.telemetry-detail {
+  display: grid;
+  gap: 18px;
+}
+.telemetry-fields,
+.telemetry-samples {
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.telemetry-fields .data-view-toolbar,
+.telemetry-samples .data-view-toolbar {
+  margin: 0;
+}
+.channel-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+}
+.channel-list button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--ink);
+  padding: 6px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.channel-list button.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.channel-list button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.telemetry-samples .table-wrap {
+  border: 0;
+  border-top: 1px solid var(--line);
+}
 .login-panel {
   width: min(430px, 100%);
   margin: 70px auto;

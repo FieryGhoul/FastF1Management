@@ -671,13 +671,11 @@ class FastF1Adapter:
         drivers = [d.strip().upper() for d in options.get("drivers", "").split(",") if d.strip()][:2]
         if not drivers:
             drivers = list(session.results["Abbreviation"].dropna().head(1))
-        requested = [
-            c.strip()
-            for c in options.get(
-                "channels", "Speed,RPM,Throttle,Brake,nGear,DRS",
-            ).split(",")
-            if c.strip()
-        ][:24]
+        channel_selection = options.get("channels", "all").strip()
+        return_all_channels = channel_selection.lower() in {"", "all", "*"}
+        requested = [] if return_all_channels else [
+            c.strip() for c in channel_selection.split(",") if c.strip()
+        ][:64]
         stream = options.get("stream", "merged")
         traces = []
         available_channels: set[str] = set()
@@ -694,7 +692,11 @@ class FastF1Adapter:
             if stream == "merged" and "Distance" not in telemetry.columns:
                 telemetry = telemetry.add_distance()
             available_channels.update(str(column) for column in telemetry.columns)
-            allowed = [column for column in requested if column in telemetry.columns]
+            allowed = (
+                list(telemetry.columns)
+                if return_all_channels
+                else [column for column in requested if column in telemetry.columns]
+            )
             stride = max(1, int(np.ceil(len(telemetry) / 1500)))
             columns = list(dict.fromkeys([
                 column
@@ -703,10 +705,17 @@ class FastF1Adapter:
                 )
                 if column in telemetry.columns
             ]))
+            sampled = telemetry.iloc[::stride]
             traces.append({"driver": driver, "lap": clean(lap.get("LapNumber")),
                            "lap_time": clean(lap.get("LapTime")),
-                           "points": records(telemetry.iloc[::stride], columns)})
-        returned_channels = [channel for channel in requested if channel in available_channels]
+                           "point_count": len(telemetry),
+                           "returned_point_count": len(sampled),
+                           "points": records(sampled, columns)})
+        returned_channels = (
+            sorted(available_channels)
+            if return_all_channels
+            else [channel for channel in requested if channel in available_channels]
+        )
         if stream == "merged" and len(traces) == 2:
             reference = traces[0]["points"]
             comparison = traces[1]["points"]

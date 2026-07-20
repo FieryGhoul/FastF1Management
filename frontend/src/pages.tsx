@@ -1326,7 +1326,7 @@ export function SessionPage() {
   const [tab, setTab] = useState(searchParams.get("tab") ?? "Overview"),
     [drivers, setDrivers] = useState(""),
     [lapNumber, setLapNumber] = useState(""),
-    [channels, setChannels] = useState("Speed,RPM,Throttle,Brake,nGear,DRS"),
+    [channels, setChannels] = useState("all"),
     [plotChannel, setPlotChannel] = useState("Speed"),
     [stream, setStream] = useState<"merged" | "car" | "position">("merged");
   const kind =
@@ -1542,10 +1542,10 @@ export function SessionPage() {
                   | "position";
                 setStream(next);
                 if (next === "position") {
-                  setChannels("X,Y,Z,Status");
+                  setChannels("all");
                   setPlotChannel("X");
                 } else {
-                  setChannels("Speed,RPM,Throttle,Brake,nGear,DRS");
+                  setChannels("all");
                   setPlotChannel("Speed");
                 }
               }}
@@ -1562,9 +1562,10 @@ export function SessionPage() {
               value={channels}
               onChange={(e) => setChannels(e.target.value)}
               maxLength={512}
-              placeholder="Comma-separated channels"
+              placeholder="all or comma-separated channels"
             />
             <datalist id="telemetry-channel-presets">
+              <option value="all" />
               <option value="Speed,RPM,Throttle,Brake,nGear,DRS" />
               <option value="Speed,Throttle,Brake" />
               <option value="Speed,RPM,nGear" />
@@ -1618,28 +1619,67 @@ export function SessionPage() {
       ) : payload?.availability === "unavailable" ? (
         <Empty title="Detail unavailable" copy={payload.unavailable_reason} />
       ) : tab === "Telemetry" && data ? (
-        <div className="chart-panel">
-          <Suspense
-            fallback={
-              <Empty
-                loading
-                title="Loading chart"
-                copy="Preparing the telemetry renderer."
-              />
-            }
-          >
-            <TelemetryChart option={telemetryOption} />
-          </Suspense>
-          <div className="trace-meta">
-            {data.traces?.map((t: any) => (
+        <div className="telemetry-detail">
+          <div className="chart-panel">
+            <Suspense
+              fallback={
+                <Empty
+                  loading
+                  title="Loading chart"
+                  copy="Preparing the telemetry renderer."
+                />
+              }
+            >
+              <TelemetryChart option={telemetryOption} />
+            </Suspense>
+            <div className="trace-meta">
+              {data.traces?.map((t: any) => (
+                <Metric
+                  key={t.driver}
+                  label={t.driver}
+                  value={duration(t.lap_time)}
+                  detail={`${lapNumber ? "Selected" : "Fastest"} lap ${t.lap} · ${Number(t.point_count ?? t.points?.length ?? 0).toLocaleString()} points`}
+                />
+              ))}
               <Metric
-                key={t.driver}
-                label={t.driver}
-                value={duration(t.lap_time)}
-                detail={`${lapNumber ? "Selected" : "Fastest"} lap ${t.lap}`}
+                label="Channels"
+                value={data.available_channels?.length ?? 0}
+                detail={data.stream?.replaceAll("_", " ") ?? "merged"}
               />
-            ))}
+            </div>
           </div>
+          <section className="telemetry-fields" aria-label="Available telemetry channels">
+            <div className="data-view-toolbar">
+              <span>All available telemetry channels</span>
+              <b>{data.available_channels?.length ?? 0} fields</b>
+            </div>
+            <div className="channel-list">
+              {data.available_channels?.map((channel: string) => (
+                <button
+                  type="button"
+                  key={channel}
+                  className={channel === activePlotChannel ? "active" : ""}
+                  onClick={() => setPlotChannel(channel)}
+                  disabled={!chartChannels.includes(channel)}
+                  title={chartChannels.includes(channel) ? "Plot this channel" : "Non-numeric channel"}
+                >
+                  {fieldLabel(channel)}
+                </button>
+              ))}
+            </div>
+          </section>
+          {data.traces?.map((trace: any) => (
+            <section className="telemetry-samples" key={`${trace.driver}-${trace.lap}`}>
+              <div className="data-view-toolbar">
+                <span>{trace.driver} · lap {trace.lap} telemetry samples</span>
+                <b>{Number(trace.returned_point_count ?? trace.points?.length ?? 0).toLocaleString()} shown</b>
+              </div>
+              <DataTable
+                columns={allDataColumns(trace.points ?? [])}
+                rows={trace.points ?? []}
+              />
+            </section>
+          ))}
         </div>
       ) : tab === "Overview" && data ? (
         <div className="session-overview">

@@ -191,6 +191,34 @@ def test_telemetry_endpoint_reads_losslessly_compressed_points():
     assert trace["points"] == points
 
 
+def test_telemetry_endpoint_returns_every_channel_by_default():
+    points = [{
+        "Distance": 0.0, "Time": 0, "Speed": 120, "RPM": 9000,
+        "Brake": False, "Source": "car", "CustomChannel": 42,
+    }]
+    database.telemetry_laps.insert_one({
+        "_id": "2026-1-Q:TST:1", "session_id": "2026-1-Q", "driver": "TST",
+        "lap": 1, "lap_time": 90_000,
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "points_compressed": compress_telemetry_points(points),
+        "points_encoding": TELEMETRY_POINTS_ENCODING, "point_count": len(points),
+    })
+    set_dataset_status(
+        database, "2026-1-Q", "telemetry", "available", source="test",
+        schema_version=TELEMETRY_SCHEMA_VERSION,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/sessions/2026-1-Q/telemetry?drivers=TST")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["channels"] == sorted(points[0])
+    assert data["traces"][0]["points"] == points
+    assert data["traces"][0]["point_count"] == 1
+    assert data["traces"][0]["returned_point_count"] == 1
+
+
 def test_telemetry_endpoint_exposes_original_car_stream():
     merged = [{"Distance": 0.0, "Time": 0, "Speed": 120}]
     car = [{"Time": 0, "Speed": 119, "Source": "car"}]

@@ -361,7 +361,7 @@ def telemetry(
     background_tasks: BackgroundTasks,
     drivers: str = "",
     laps: str = Query(default="fastest", max_length=16),
-    channels: str = "Speed,RPM,Throttle,Brake,nGear,DRS",
+    channels: str = "all",
     stream: Literal["merged", "car", "position"] = "merged",
     db: Database = Depends(get_db),
 ) -> dict:
@@ -380,10 +380,12 @@ def telemetry(
         if selected_lap < 1:
             raise HTTPException(422, "Lap must be 'fastest' or a positive number")
     requested_drivers = [value.strip().upper() for value in drivers.split(",") if value.strip()][:2]
-    requested_channels = [
+    channel_selection = channels.strip().lower()
+    return_all_channels = channel_selection in {"", "all", "*"}
+    requested_channels = [] if return_all_channels else [
         value.strip() for value in channels.split(",")
         if value.strip() and len(value.strip()) <= 64
-    ][:24]
+    ][:64]
     telemetry_state = db.dataset_status.find_one({
         "subject": session_id, "dataset": "telemetry",
     })
@@ -446,12 +448,24 @@ def telemetry(
         stride = max(1, int(np.ceil(len(points) / 1500)))
         selected = []
         for point in points[::stride]:
-            keys = list(dict.fromkeys([
-                "Distance", "Time", "SessionTime", "X", "Y", "Z",
-                *requested_channels,
-            ]))
+            keys = (
+                list(point.keys())
+                if return_all_channels
+                else list(dict.fromkeys([
+                    "Distance", "Time", "SessionTime", "X", "Y", "Z",
+                    *requested_channels,
+                ]))
+            )
             selected.append({key: point.get(key) for key in keys if key in point})
-        traces.append({"driver": code, "lap": document.get("lap"), "lap_time": document.get("lap_time"), "points": selected})
+        count_key = "point_count" if stream == "merged" else f"{stream}_point_count"
+        traces.append({
+            "driver": code,
+            "lap": document.get("lap"),
+            "lap_time": document.get("lap_time"),
+            "point_count": document.get(count_key, len(points)),
+            "returned_point_count": len(selected),
+            "points": selected,
+        })
     if stream == "merged" and len(traces) == 2:
         reference = [(point.get("Distance"), point.get("Time")) for point in traces[0]["points"] if point.get("Distance") is not None and point.get("Time") is not None]
         if reference:
@@ -470,9 +484,11 @@ def telemetry(
             "data": None,
             "source": "MongoDB",
         }
-    returned_channels = [
-        channel for channel in requested_channels if channel in available_channels
-    ]
+    returned_channels = (
+        sorted(available_channels)
+        if return_all_channels
+        else [channel for channel in requested_channels if channel in available_channels]
+    )
     if stream == "merged" and len(traces) == 2:
         returned_channels.append("Delta")
     return {

@@ -1,4 +1,4 @@
-"""Copy one season's non-telemetry data between MongoDB deployments.
+"""Copy race-data serving documents between MongoDB deployments.
 
 The destination URL is read from ``DESTINATION_MONGODB_URL`` so credentials do
 not appear in the command line. Existing documents are replaced by ``_id`` and
@@ -48,6 +48,26 @@ def season_queries(season: int, include_telemetry: bool) -> list[tuple[str, dict
     return queries
 
 
+def all_seasons_serving_queries() -> list[tuple[str, dict[str, Any]]]:
+    """Return the compact projection needed by every frontend read endpoint.
+
+    Session artifacts already contain the results, laps, strategy, weather and
+    race-control payloads served by the API. Omitting their duplicate raw
+    collections keeps the complete historical UI dataset within Atlas Free.
+    """
+    return [
+        ("seasons", {}),
+        ("events", {}),
+        ("sessions", {}),
+        ("drivers", {}),
+        ("constructors", {}),
+        ("circuits", {}),
+        ("standings", {}),
+        ("artifacts", {}),
+        ("dataset_status", {"dataset": {"$ne": "telemetry"}}),
+    ]
+
+
 def batches(documents: Iterator[dict[str, Any]], size: int = 250) -> Iterator[list[dict[str, Any]]]:
     batch: list[dict[str, Any]] = []
     for document in documents:
@@ -80,12 +100,21 @@ def replacement_document(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Copy one race-data season to another MongoDB deployment"
+        description="Copy race-data serving documents to another MongoDB deployment"
     )
-    parser.add_argument("--season", type=int, required=True)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--season", type=int)
+    selection.add_argument(
+        "--all-seasons",
+        action="store_true",
+        help="copy the compact, non-telemetry frontend dataset for every season",
+    )
     parser.add_argument("--include-telemetry", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    if args.all_seasons and args.include_telemetry:
+        parser.error("--include-telemetry cannot be combined with --all-seasons")
 
     source_url = os.getenv("SOURCE_MONGODB_URL", "mongodb://localhost:27017")
     destination_url = os.getenv("DESTINATION_MONGODB_URL")
@@ -120,9 +149,12 @@ def main() -> int:
 
     total = 0
     try:
-        for collection_name, query in season_queries(
-            args.season, args.include_telemetry
-        ):
+        queries = (
+            all_seasons_serving_queries()
+            if args.all_seasons
+            else season_queries(args.season, args.include_telemetry)
+        )
+        for collection_name, query in queries:
             source_collection = source[collection_name]
             count = source_collection.count_documents(query)
             total += count
@@ -142,10 +174,8 @@ def main() -> int:
                     ],
                     ordered=False,
                 )
-        print(
-            f"{'Would copy' if args.dry_run else 'Copied'} {total} documents "
-            f"for season {args.season}"
-        )
+        scope = "all frontend-serving seasons" if args.all_seasons else f"season {args.season}"
+        print(f"{'Would copy' if args.dry_run else 'Copied'} {total} documents for {scope}")
         return 0
     finally:
         source_client.close()

@@ -10,7 +10,7 @@ from pymongo import UpdateOne
 from pymongo.database import Database
 
 from .circuit_matching import circuit_match_score, country_variants
-from .contracts import ARCHIVE_SCHEMA_VERSION, stores_persistent_telemetry
+from .contracts import ARCHIVE_SCHEMA_VERSION, is_public_driver_profile, stores_persistent_telemetry
 from .fastf1_adapter import FastF1Adapter, slugify
 from .mongo import set_dataset_status, utcnow
 from .serialization import (
@@ -158,6 +158,8 @@ def sync_season(db: Database, adapter: FastF1Adapter, year: int) -> dict[str, in
     ):
         try:
             rows = fetcher(year)
+            if entity == "drivers":
+                rows = [row for row in rows if is_public_driver_profile(row)]
             documents = [{"_id": f"{year}:{row.get(identifier)}", "season": year, **row, "synced_at": now} for row in rows]
             current_ids = [document["_id"] for document in documents]
             db[entity].delete_many({

@@ -9,6 +9,18 @@ from typing import Any
 ARTIFACT_VERSION = "v4"
 ARCHIVE_SCHEMA_VERSION = 4
 PERSISTENT_TELEMETRY_SESSION_CODES = frozenset({"R"})
+DRIVER_PROFILE_FIELDS = (
+    "driverCode",
+    "driverNumber",
+    "driverUrl",
+    "dateOfBirth",
+    "driverNationality",
+)
+
+
+def is_public_driver_profile(row: dict[str, Any]) -> bool:
+    """Exclude name-only reserve/test placeholders from driver directories."""
+    return any(row.get(field) not in (None, "") for field in DRIVER_PROFILE_FIELDS)
 
 
 def stores_persistent_telemetry(

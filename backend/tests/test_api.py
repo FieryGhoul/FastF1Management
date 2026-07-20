@@ -96,15 +96,22 @@ def test_missing_archive_directories_prioritize_selected_season():
 
 
 def test_stored_archive_directory_does_not_queue_reimport():
-    database.drivers.insert_one({
-        "_id": "1996:hill", "season": 1996, "driverId": "hill",
-        "driverCode": "HIL", "givenName": "Damon", "familyName": "Hill",
-    })
+    database.drivers.insert_many([
+        {
+            "_id": "1996:hill", "season": 1996, "driverId": "hill",
+            "driverCode": "HIL", "givenName": "Damon", "familyName": "Hill",
+        },
+        {
+            "_id": "1996:reserve", "season": 1996, "driverId": "reserve",
+            "givenName": "Reserve", "familyName": "Placeholder",
+        },
+    ])
 
     with TestClient(app) as client:
         response = client.get("/api/v1/drivers?season=1996")
 
     assert response.json()["availability"] == "available"
+    assert len(response.json()["data"]) == 1
     assert response.json()["data"][0]["familyName"] == "Hill"
     assert database.jobs.count_documents({"key": "season:1996"}) == 0
 

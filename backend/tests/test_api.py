@@ -63,6 +63,22 @@ def test_public_calendar_reads_mongodb_without_upstream_calls():
     assert response.json()["source"] == "MongoDB"
 
 
+def test_missing_calendar_is_prioritized_and_reports_import_status():
+    with TestClient(app) as client:
+        first = client.get("/api/v1/calendar/2001")
+        second = client.get("/api/v1/calendar/2001")
+
+    body = first.json()
+    assert first.status_code == 200
+    assert body["availability"] == "awaiting_data"
+    assert body["status"] == "queued"
+    assert body["job_id"] == second.json()["job_id"]
+    assert "appear automatically" in body["unavailable_reason"]
+    job = database.jobs.find_one({"key": "season:2001"})
+    assert job["priority"] == 200
+    assert database.jobs.count_documents({"key": "season:2001"}) == 1
+
+
 def test_session_overview_uses_calendar_metadata_without_processing(monkeypatch):
     class UnexpectedCache:
         def get_or_schedule(self, *_args, **_kwargs):

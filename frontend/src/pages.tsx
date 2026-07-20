@@ -54,6 +54,8 @@ function useCalendar(year: number) {
   return useQuery({
     queryKey: ["calendar", year],
     queryFn: () => api<ApiEnvelope<RaceEvent[]>>(`/calendar/${year}`),
+    refetchInterval: (result) =>
+      result.state.data?.availability === "awaiting_data" ? 3000 : false,
   });
 }
 
@@ -401,6 +403,7 @@ export function CalendarPage() {
           (s) => s.starts_at && new Date(s.starts_at).getTime() > now,
         ),
   );
+  const awaitingData = query.data?.availability === "awaiting_data";
   return (
     <div className="page">
       <PageHeader
@@ -419,8 +422,22 @@ export function CalendarPage() {
       ) : query.isLoading ? (
         <Empty
           loading
-          title="Loading circuit atlas"
-          copy="Reading every stored circuit outline."
+          title={`Loading ${year} calendar`}
+          copy="Reading the stored season programme."
+        />
+      ) : awaitingData ? (
+        <Empty
+          loading
+          title={`Preparing the ${year} season`}
+          copy={
+            query.data?.unavailable_reason ??
+            "The season import is queued. Events will appear automatically."
+          }
+        />
+      ) : events.length === 0 ? (
+        <Empty
+          title={`No ${filter.toLowerCase()} events`}
+          copy={`There are no ${filter.toLowerCase()} events in the ${year} calendar.`}
         />
       ) : (
         <div className="calendar-list">
@@ -428,13 +445,6 @@ export function CalendarPage() {
             <EventCard key={e.id} event={e} />
           ))}
         </div>
-      )}
-      {query.isLoading && (
-        <Empty
-          loading
-          title="Loading calendar"
-          copy={`Syncing ${year} from FastF1.`}
-        />
       )}
     </div>
   );

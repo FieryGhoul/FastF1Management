@@ -186,13 +186,29 @@ def calendar(season: int, db: Database = Depends(get_db)) -> dict:
         raise HTTPException(422, "Season is outside the supported range")
     rows = [public_document(row) for row in db.events.find({"season": season}).sort("round", ASCENDING)]
     state = db.dataset_status.find_one({"subject": str(season), "dataset": "calendar"})
+    job = None
+    if not rows and season <= utcnow().year:
+        # A season selected by a visitor should jump ahead of the background
+        # archive sweep. queue_job is idempotent while work is pending, so the
+        # calendar can safely poll this endpoint until the worker stores it.
+        job = queue_job(
+            db,
+            "season",
+            f"season:{season}",
+            {"season": season},
+            priority=200,
+        )
     return {
         "data": rows,
         "season": season,
         "availability": "available" if rows else "awaiting_data",
-        "unavailable_reason": None if rows else "This season has not been ingested yet.",
+        "unavailable_reason": None if rows else (
+            f"The {season} season is queued for import. Events will appear automatically."
+        ),
         "source": "MongoDB",
         "updated_at": state.get("last_synced_at") if state else None,
+        "job_id": job.get("_id") if job else None,
+        "status": job.get("status") if job else None,
     }
 
 

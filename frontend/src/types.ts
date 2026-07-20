@@ -4,6 +4,8 @@ export type ApiEnvelope<T> = {
   updated_at?: string;
   availability?: string;
   unavailable_reason?: string | null;
+  job_id?: string | null;
+  status?: string | null;
 };
 
 export type SessionRef = {

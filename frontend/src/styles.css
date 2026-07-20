@@ -289,6 +289,9 @@ p {
 .button.ghost {
   background: transparent;
 }
+.detail-back {
+  margin-bottom: 22px;
+}
 .hero-track {
   padding-left: 5vw;
 }

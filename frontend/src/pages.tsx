@@ -10,6 +10,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   Activity,
+  ArrowLeft,
   ArrowRight,
   CalendarDays,
   Check,
@@ -473,6 +474,9 @@ export function EventPage() {
     );
   return (
     <div className="page">
+      <Link className="button ghost detail-back" to="/calendar">
+        <ArrowLeft /> Back to calendar
+      </Link>
       {event ? (
         <>
           <PageHeader
@@ -1460,6 +1464,11 @@ function ResultsAnalysis({ rows }: { rows: Record<string, unknown>[] }) {
 
 export function SessionPage() {
   const { sessionId } = useParams();
+  const sessionIdParts = sessionId?.split("-") ?? [];
+  const eventPath =
+    sessionIdParts.length >= 3
+      ? `/events/${sessionIdParts[0]}/${sessionIdParts[1]}`
+      : "/calendar";
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState(searchParams.get("tab") ?? "Overview"),
     [drivers, setDrivers] = useState(""),
@@ -1636,6 +1645,9 @@ export function SessionPage() {
   if (payload?.status === "failed")
     return (
       <div className="page">
+        <Link className="button ghost detail-back" to={eventPath}>
+          <ArrowLeft /> Back to race
+        </Link>
         <PageHeader
           eyebrow="Session analysis"
           title={sessionId?.replaceAll("-", " / ") ?? "Session"}
@@ -1653,6 +1665,9 @@ export function SessionPage() {
     );
   return (
     <div className="page">
+      <Link className="button ghost detail-back" to={eventPath}>
+        <ArrowLeft /> Back to race
+      </Link>
       <PageHeader
         eyebrow={
           sessionSummary

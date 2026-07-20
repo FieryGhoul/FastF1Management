@@ -79,6 +79,30 @@ def test_missing_calendar_is_prioritized_and_reports_import_status():
     assert database.jobs.count_documents({"key": "season:2001"}) == 1
 
 
+def test_missing_calendar_can_be_filled_by_single_service_fallback(monkeypatch):
+    import app.main as main_module
+
+    class CalendarCache:
+        def sync_calendar(self, db, season):
+            db.events.insert_one({
+                "_id": f"{season}-1", "id": f"{season}-1", "season": season,
+                "round": 1, "name": "Fallback Grand Prix", "sessions": [],
+            })
+            return {"events": 1, "sessions": 0}
+
+    monkeypatch.setattr(main_module, "on_demand_cache", CalendarCache())
+    with TestClient(app) as client:
+        queued = client.get("/api/v1/calendar/2002")
+        available = client.get("/api/v1/calendar/2002")
+
+    assert queued.json()["availability"] == "awaiting_data"
+    assert available.json()["availability"] == "available"
+    assert available.json()["data"][0]["name"] == "Fallback Grand Prix"
+    job = database.jobs.find_one({"key": "season:2002"})
+    assert job["status"] == "completed"
+    assert job["result"] == {"events": 1, "sessions": 0}
+
+
 def test_session_overview_uses_calendar_metadata_without_processing(monkeypatch):
     class UnexpectedCache:
         def get_or_schedule(self, *_args, **_kwargs):

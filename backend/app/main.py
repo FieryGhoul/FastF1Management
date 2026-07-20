@@ -8,7 +8,7 @@ from typing import Any, Literal
 import numpy as np
 from fastapi import BackgroundTasks, Body, Cookie, Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pymongo import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.database import Database
 
 from .circuit_matching import circuit_match_score, country_variants
@@ -62,6 +62,48 @@ def parse_datetime(value: Any) -> datetime | None:
     else:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def _process_calendar_job_inline(job_id: str, season: int) -> None:
+    """Fill calendar metadata when a separate queue worker is unavailable."""
+    if on_demand_cache is None:
+        return
+    now = utcnow()
+    job = database.jobs.find_one_and_update(
+        {
+            "_id": job_id,
+            "status": "queued",
+            "scheduled_for": {"$lte": now},
+        },
+        {
+            "$set": {"status": "running", "progress": 20, "updated_at": now},
+            "$inc": {"attempts": 1},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if not job:
+        return
+    try:
+        result = on_demand_cache.sync_calendar(database, season)
+        database.jobs.update_one(
+            {"_id": job_id},
+            {"$set": {
+                "status": "completed", "progress": 100, "error": None,
+                "result": result, "updated_at": utcnow(),
+            }},
+        )
+    except Exception as exc:
+        attempts = int(job.get("attempts", 1))
+        transient = attempts < 3
+        update = {
+            "status": "queued" if transient else "failed",
+            "progress": 0 if transient else 20,
+            "error": str(exc),
+            "updated_at": utcnow(),
+        }
+        if transient:
+            update["scheduled_for"] = utcnow() + timedelta(minutes=2 ** attempts)
+        database.jobs.update_one({"_id": job_id}, {"$set": update})
 
 
 def _recent_session_rate(completions: list[dict[str, Any]]) -> tuple[float | None, int]:
@@ -181,7 +223,11 @@ def seasons(db: Database = Depends(get_db)) -> dict:
 
 
 @app.get("/api/v1/calendar/{season}")
-def calendar(season: int, db: Database = Depends(get_db)) -> dict:
+def calendar(
+    season: int,
+    background_tasks: BackgroundTasks,
+    db: Database = Depends(get_db),
+) -> dict:
     if season < 1950 or season > utcnow().year + 1:
         raise HTTPException(422, "Season is outside the supported range")
     rows = [public_document(row) for row in db.events.find({"season": season}).sort("round", ASCENDING)]
@@ -198,6 +244,12 @@ def calendar(season: int, db: Database = Depends(get_db)) -> dict:
             {"season": season},
             priority=200,
         )
+        if on_demand_cache is not None:
+            background_tasks.add_task(
+                _process_calendar_job_inline,
+                job["_id"],
+                season,
+            )
     return {
         "data": rows,
         "season": season,

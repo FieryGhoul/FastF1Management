@@ -1,8 +1,8 @@
-"""Small, ephemeral artifact cache for single-service demo deployments.
+"""Small on-demand loader for single-service deployments.
 
-This deliberately does not write fetched FastF1 payloads to MongoDB.  Render
-free web services lose their filesystem when they restart or spin down, so the
-cache is an optimization rather than durable storage.
+Session artifacts deliberately remain in the ephemeral filesystem cache.
+Small calendar metadata imports are written to MongoDB so the public archive
+can still fill itself when a separately deployed worker is delayed.
 """
 
 from __future__ import annotations
@@ -16,8 +16,10 @@ from typing import Any
 
 from fastapi import BackgroundTasks
 from fastapi.encoders import jsonable_encoder
+from pymongo.database import Database
 
 from .fastf1_adapter import FastF1Adapter
+from .ingestion import sync_season
 
 
 class OnDemandArtifactCache:
@@ -91,6 +93,11 @@ class OnDemandArtifactCache:
                 total -= size
             except FileNotFoundError:
                 continue
+
+    def sync_calendar(self, db: Database, season: int) -> dict[str, int]:
+        """Persist one lightweight season schedule using the shared adapter."""
+        with self._adapter_lock:
+            return sync_season(db, self.adapter, season)
 
     @staticmethod
     def _pending(kind: str, status: str) -> dict[str, Any]:

@@ -111,9 +111,38 @@ def test_stored_archive_directory_does_not_queue_reimport():
         response = client.get("/api/v1/drivers?season=1996")
 
     assert response.json()["availability"] == "available"
-    assert len(response.json()["data"]) == 1
-    assert response.json()["data"][0]["familyName"] == "Hill"
+    assert [row["familyName"] for row in response.json()["data"]] == ["Hill", "Placeholder"]
+    assert response.json()["data"][0]["driverRole"] == "race"
+    assert response.json()["data"][0]["isReserve"] is False
+    assert response.json()["data"][1]["driverRole"] == "reserve"
+    assert response.json()["data"][1]["isReserve"] is True
     assert database.jobs.count_documents({"key": "season:1996"}) == 0
+
+    with TestClient(app) as client:
+        detail = client.get("/api/v1/drivers/reserve?season=1996")
+
+    assert detail.status_code == 200
+    assert detail.json()["data"]["driverRole"] == "reserve"
+
+
+def test_current_legacy_driver_directory_queues_one_role_refresh(monkeypatch):
+    import app.main as main_module
+
+    season = utcnow().year
+    monkeypatch.setattr(main_module, "on_demand_cache", None)
+    database.drivers.insert_one({
+        "_id": f"{season}:legacy", "season": season, "driverId": "legacy",
+        "driverCode": "LEG", "givenName": "Legacy", "familyName": "Driver",
+    })
+
+    with TestClient(app) as client:
+        first = client.get(f"/api/v1/drivers?season={season}")
+        second = client.get(f"/api/v1/drivers?season={season}")
+
+    assert first.json()["availability"] == "available"
+    assert first.json()["data"][0]["driverRole"] == "race"
+    assert second.json()["job_id"] == first.json()["job_id"]
+    assert database.jobs.count_documents({"key": f"season:{season}"}) == 1
 
 
 def test_current_driver_portraits_are_exposed(monkeypatch):

@@ -790,6 +790,9 @@ p {
 .driver-card {
   min-height: 500px !important;
 }
+.driver-card.is-reserve {
+  border-top-color: var(--accent);
+}
 .driver-portrait {
   height: clamp(260px, 22vw, 340px);
   margin: -24px -24px 18px;
@@ -830,6 +833,66 @@ p {
 .driver-card > p {
   position: relative;
   z-index: 1;
+}
+.driver-card > .driver-role-tag {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 3;
+  padding: 6px 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.reserve-driver-section {
+  margin-top: 64px;
+  padding-top: 30px;
+  border-top: 1px solid var(--line);
+}
+.directory-section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 22px;
+}
+.directory-section-heading > div > span {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.directory-section-heading h2 {
+  margin: 3px 0 4px;
+  font: italic 800 42px/1 "Barlow Condensed Variable";
+  text-transform: uppercase;
+}
+.directory-section-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.directory-section-heading > strong,
+.driver-role-pill {
+  border: 1px solid var(--line);
+  padding: 7px 10px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.driver-role-pill.is-reserve {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.driver-role-pill.is-race {
+  color: var(--muted);
 }
 .circuit-grid > a {
   min-height: 300px;
@@ -1684,6 +1747,10 @@ body {
   }
   .directory-tools .field-toggle {
     width: 100%;
+  }
+  .directory-section-heading {
+    align-items: flex-start;
+    flex-direction: column;
   }
   .lap-summary {
     grid-template-columns: repeat(2, 1fr);

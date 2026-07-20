@@ -97,7 +97,7 @@ def test_season_and_session_data_are_normalized_into_mongodb():
     })
     persist_session_bundle(database, adapter, "2025-1-R")
     assert counts["events"] == 1
-    assert counts["drivers"] == 1
+    assert counts["drivers"] == 2
     assert database.events.count_documents({"season": 2025}) == 1
     assert database.sessions.count_documents({"season": 2025}) == 1
     assert database.events.find_one({"_id": "2025-1"})["circuit_slug"] == "test"
@@ -108,7 +108,9 @@ def test_season_and_session_data_are_normalized_into_mongodb():
     assert database.laps.count_documents({"session_id": "2025-1-R"}) == 1
     assert database.laps.find_one({"session_id": "2025-1-R"})["Driver"] == "TST"
     assert database.drivers.find_one({"_id": "2025:obsolete"}) is None
-    assert database.drivers.find_one({"_id": "2025:reserve"}) is None
+    reserve = database.drivers.find_one({"_id": "2025:reserve"})
+    assert reserve["driverRole"] == "reserve"
+    assert reserve["isReserve"] is True
     assert database.artifacts.count_documents({"_id": {"$regex": "^v3:"}}) == 0
 
 

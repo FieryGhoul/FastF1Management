@@ -16,11 +16,41 @@ DRIVER_PROFILE_FIELDS = (
     "dateOfBirth",
     "driverNationality",
 )
+RESERVE_DRIVER_ROLES = frozenset({
+    "reserve", "reserve_driver", "test", "test_driver", "development",
+    "development_driver",
+})
+RACE_DRIVER_ROLES = frozenset({"race", "race_driver", "main", "regular"})
 
 
 def is_public_driver_profile(row: dict[str, Any]) -> bool:
-    """Exclude name-only reserve/test placeholders from driver directories."""
+    """Return whether a driver has the metadata supplied for a race driver."""
     return any(row.get(field) not in (None, "") for field in DRIVER_PROFILE_FIELDS)
+
+
+def is_reserve_driver(row: dict[str, Any]) -> bool:
+    """Classify explicit reserves, falling back to name-only source records."""
+    explicit_reserve = row.get("isReserve")
+    if isinstance(explicit_reserve, bool):
+        return explicit_reserve
+
+    explicit_role = (
+        str(row.get("driverRole") or row.get("role") or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+    if explicit_role in RESERVE_DRIVER_ROLES:
+        return True
+    if explicit_role in RACE_DRIVER_ROLES:
+        return False
+    return not is_public_driver_profile(row)
+
+
+def driver_role(row: dict[str, Any]) -> str:
+    """Return the stable public role used by driver directory clients."""
+    return "reserve" if is_reserve_driver(row) else "race"
 
 
 def stores_persistent_telemetry(

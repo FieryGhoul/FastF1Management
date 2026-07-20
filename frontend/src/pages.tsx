@@ -820,6 +820,46 @@ function DriverPortrait({
   );
 }
 
+function isReserveDriver(row: Record<string, unknown>) {
+  if (row.isReserve === true || row.isReserve === "true") return true;
+  if (row.isReserve === false || row.isReserve === "false") return false;
+  const role = String(row.driverRole ?? "").toLowerCase();
+  if (role === "reserve") return true;
+  if (role === "race") return false;
+
+  // Support responses cached before explicit driver roles were introduced.
+  return ![
+    "driverNumber",
+    "driverCode",
+    "driverUrl",
+    "url",
+    "dateOfBirth",
+    "driverNationality",
+  ].some((field) => {
+    const value = row[field];
+    return value != null && String(value).trim() !== "";
+  });
+}
+
+function driverDirectoryColumns(rows: Record<string, unknown>[]) {
+  const columns = allDataColumns(rows);
+  const roleColumn = {
+    key: "driverRole",
+    label: "Role",
+    render: (row: Record<string, unknown>) => {
+      const reserve = isReserveDriver(row);
+      return (
+        <span
+          className={`driver-role-pill ${reserve ? "is-reserve" : "is-race"}`}
+        >
+          {reserve ? "Reserve" : "Race"}
+        </span>
+      );
+    },
+  };
+  return [roleColumn, ...columns.filter((column) => column.key !== "driverRole")];
+}
+
 function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
   const [year, setYear] = useState(currentYear),
     [search, setSearch] = useState(""),
@@ -856,8 +896,78 @@ function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
     [officialPortraits.data?.data, year],
   );
   const awaitingData = query.data?.availability === "awaiting_data";
-  const rows = (query.data?.data ?? []).filter((r) =>
+  const filteredRows = (query.data?.data ?? []).filter((r) =>
     JSON.stringify(r).toLowerCase().includes(search.toLowerCase()),
+  );
+  const reserveRows =
+    kind === "drivers"
+      ? filteredRows.filter((row) => isReserveDriver(row))
+      : [];
+  const primaryRows =
+    kind === "drivers"
+      ? filteredRows.filter((row) => !isReserveDriver(row))
+      : filteredRows;
+  const rows = [...primaryRows, ...reserveRows];
+  const renderCards = (
+    cardRows: Record<string, unknown>[],
+    indexOffset = 0,
+  ) => (
+    <div className="entity-grid">
+      {cardRows.map((r, i) => {
+        const fullName = `${r.givenName ?? ""} ${r.familyName ?? ""}`.trim();
+        const articleUrl = String(r.driverUrl ?? r.url ?? "") || undefined;
+        const reserve = kind === "drivers" && isReserveDriver(r);
+        return (
+          <article
+            className={
+              kind === "drivers"
+                ? `driver-card${reserve ? " is-reserve" : ""}`
+                : undefined
+            }
+            key={String(r.driverId ?? r.constructorId ?? i + indexOffset)}
+          >
+            {kind === "drivers" && (
+              <DriverPortrait
+                fullName={fullName || "Formula 1 driver"}
+                articleUrl={articleUrl}
+                officialPortrait={
+                  officialPortraitByName.get(normalizedName(fullName)) ??
+                  officialPortraitByName.get(
+                    normalizedName(String(r.familyName ?? "")),
+                  )
+                }
+              />
+            )}
+            {reserve && <span className="driver-role-tag">Reserve</span>}
+            <span>
+              {kind === "drivers"
+                ? String(r.driverNumber ?? r.driverCode ?? "—")
+                : String(i + indexOffset + 1).padStart(2, "0")}
+            </span>
+            <h2>
+              {kind === "drivers"
+                ? `${r.givenName ?? ""} ${r.familyName ?? ""}`
+                : String(r.constructorName ?? r.name ?? "Unknown")}
+            </h2>
+            {kind === "drivers" && (
+              <small className="entity-short-name">
+                {String(r.driverCode ?? "—").toUpperCase()}
+              </small>
+            )}
+            <p>
+              {String(
+                r.driverNationality ??
+                  r.constructorNationality ??
+                  "Nationality unavailable",
+              )}
+            </p>
+            <div className="entity-code">
+              {String(r.driverCode ?? r.constructorId ?? "F1").toUpperCase()}
+            </div>
+          </article>
+        );
+      })}
+    </div>
   );
   return (
     <div className="page">
@@ -899,59 +1009,42 @@ function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
           }
         />
       ) : showAllFields ? (
-        <DataTable columns={allDataColumns(rows)} rows={rows} />
-      ) : (
-        <div className="entity-grid">
-          {rows.map((r, i) => {
-            const fullName = `${r.givenName ?? ""} ${r.familyName ?? ""}`.trim();
-            const articleUrl = String(r.driverUrl ?? r.url ?? "") || undefined;
-            return (
-              <article
-                className={kind === "drivers" ? "driver-card" : undefined}
-                key={String(r.driverId ?? r.constructorId ?? i)}
-              >
-                {kind === "drivers" && (
-                  <DriverPortrait
-                    fullName={fullName || "Formula 1 driver"}
-                    articleUrl={articleUrl}
-                    officialPortrait={officialPortraitByName.get(
-                      normalizedName(fullName),
-                    ) ?? officialPortraitByName.get(
-                      normalizedName(String(r.familyName ?? "")),
-                    )}
-                  />
-                )}
-                <span>
-                  {kind === "drivers"
-                    ? String(r.driverNumber ?? r.driverCode ?? "—")
-                    : String(i + 1).padStart(2, "0")}
-                </span>
-                <h2>
-                  {kind === "drivers"
-                    ? `${r.givenName ?? ""} ${r.familyName ?? ""}`
-                    : String(r.constructorName ?? r.name ?? "Unknown")}
-                </h2>
-                {kind === "drivers" && (
-                  <small className="entity-short-name">
-                    {String(r.driverCode ?? "—").toUpperCase()}
-                  </small>
-                )}
-                <p>
-                  {String(
-                    r.driverNationality ??
-                      r.constructorNationality ??
-                      "Nationality unavailable",
-                  )}
-                </p>
-                <div className="entity-code">
-                  {String(
-                    r.driverCode ?? r.constructorId ?? "F1",
-                  ).toUpperCase()}
+        <DataTable
+          columns={
+            kind === "drivers"
+              ? driverDirectoryColumns(rows)
+              : allDataColumns(rows)
+          }
+          rows={rows}
+        />
+      ) : kind === "drivers" ? (
+        <>
+          {renderCards(primaryRows)}
+          {reserveRows.length > 0 && (
+            <section
+              className="reserve-driver-section"
+              aria-labelledby="reserve-driver-heading"
+            >
+              <header className="directory-section-heading">
+                <div>
+                  <span>Additional entries</span>
+                  <h2 id="reserve-driver-heading">Reserve drivers</h2>
+                  <p>
+                    Reserve and development drivers registered for the selected
+                    season.
+                  </p>
                 </div>
-              </article>
-            );
-          })}
-        </div>
+                <strong>
+                  {reserveRows.length} driver
+                  {reserveRows.length === 1 ? "" : "s"}
+                </strong>
+              </header>
+              {renderCards(reserveRows, primaryRows.length)}
+            </section>
+          )}
+        </>
+      ) : (
+        renderCards(rows)
       )}
     </div>
   );

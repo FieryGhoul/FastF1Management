@@ -13,7 +13,7 @@ from pymongo.database import Database
 
 from .circuit_matching import circuit_match_score, country_variants
 from .config import get_settings
-from .contracts import artifact_key, is_public_driver_profile, stores_persistent_telemetry
+from .contracts import artifact_key, driver_role, is_reserve_driver, stores_persistent_telemetry
 from .driver_portraits import get_official_driver_portraits
 from .mongo import database, get_db, init_mongo, public_document, queue_job, utcnow
 from .on_demand import OnDemandArtifactCache
@@ -344,12 +344,33 @@ def drivers(
     db: Database = Depends(get_db),
 ) -> dict:
     _validate_archive_season(season)
-    rows = [
-        public_document(row)
-        for row in db.drivers.find({"season": season}).sort("driverCode", ASCENDING)
-        if is_public_driver_profile(row)
-    ]
-    job = _request_season_import(background_tasks, db, season) if not rows and season <= utcnow().year else None
+    stored_rows = list(db.drivers.find({"season": season}))
+    rows = []
+    for row in stored_rows:
+        document = public_document(row)
+        document["driverRole"] = driver_role(row)
+        document["isReserve"] = is_reserve_driver(row)
+        rows.append(document)
+    rows.sort(key=lambda row: (
+        row["isReserve"],
+        str(row.get("driverCode") or row.get("familyName") or "").casefold(),
+        str(row.get("givenName") or "").casefold(),
+    ))
+    current_season = utcnow().year
+    needs_role_refresh = (
+        season == current_season
+        and bool(stored_rows)
+        and any(
+            row.get("driverRole") not in {"race", "reserve"}
+            or not isinstance(row.get("isReserve"), bool)
+            for row in stored_rows
+        )
+    )
+    job = (
+        _request_season_import(background_tasks, db, season)
+        if season <= current_season and (not rows or needs_role_refresh)
+        else None
+    )
     return {
         "data": rows, "season": season, "source": "MongoDB",
         "availability": "available" if rows else "awaiting_data",
@@ -376,9 +397,12 @@ def current_driver_portraits() -> dict:
 @app.get("/api/v1/drivers/{driver_id}")
 def driver(driver_id: str, season: int = Query(default_factory=lambda: utcnow().year), db: Database = Depends(get_db)) -> dict:
     row = db.drivers.find_one({"season": season, "driverId": driver_id})
-    if not row or not is_public_driver_profile(row):
+    if not row:
         raise HTTPException(404, "Driver not found in MongoDB")
-    return {"data": public_document(row), "season": season, "source": "MongoDB"}
+    document = public_document(row)
+    document["driverRole"] = driver_role(row)
+    document["isReserve"] = is_reserve_driver(row)
+    return {"data": document, "season": season, "source": "MongoDB"}
 
 
 @app.get("/api/v1/constructors")

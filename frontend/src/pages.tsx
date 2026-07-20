@@ -1375,7 +1375,11 @@ export function SessionPage() {
         : detailQuery;
   const payload = query.data;
   const data = payload?.data;
-  const sessionSummary = summaryQuery.data?.data;
+  const rawSessionSummary = summaryQuery.data?.data;
+  const sessionSummary =
+    rawSessionSummary && !Array.isArray(rawSessionSummary)
+      ? rawSessionSummary
+      : undefined;
   const queued = payload?.status === "queued" || payload?.status === "running";
   const sessionState = payload?.availability as string | undefined;
   const waitingForSession = [

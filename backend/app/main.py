@@ -14,6 +14,7 @@ from pymongo.database import Database
 from .circuit_matching import circuit_match_score, country_variants
 from .config import get_settings
 from .contracts import artifact_key, stores_persistent_telemetry
+from .driver_portraits import get_official_driver_portraits
 from .mongo import database, get_db, init_mongo, public_document, queue_job, utcnow
 from .on_demand import OnDemandArtifactCache
 from .security import COOKIE_NAME, authenticate, create_session, ensure_admin, get_admin, require_csrf
@@ -351,6 +352,20 @@ def drivers(
         "unavailable_reason": None if rows else f"The {season} season is queued for import. Drivers will appear automatically.",
         "job_id": job.get("_id") if job else None,
         "status": job.get("status") if job else None,
+    }
+
+
+@app.get("/api/v1/driver-portraits/current")
+def current_driver_portraits() -> dict:
+    try:
+        rows = get_official_driver_portraits()
+    except Exception:
+        rows = []
+    return {
+        "data": rows,
+        "availability": "available" if rows else "unavailable",
+        "unavailable_reason": None if rows else "Official driver portraits are temporarily unavailable.",
+        "source": "Formula 1",
     }
 
 

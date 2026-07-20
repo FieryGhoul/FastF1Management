@@ -628,6 +628,22 @@ type WikipediaSummary = {
   thumbnail?: { source?: string };
 };
 
+type OfficialDriverPortrait = {
+  full_name: string;
+  image_url: string;
+  season: number;
+  source_url: string;
+};
+
+function normalizedName(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase();
+}
+
 function wikipediaSummaryEndpoint(articleUrl: string | undefined) {
   if (!articleUrl) return undefined;
   try {
@@ -650,12 +666,18 @@ function wikipediaSummaryEndpoint(articleUrl: string | undefined) {
 function DriverPortrait({
   fullName,
   articleUrl,
+  officialPortrait,
 }: {
   fullName: string;
   articleUrl?: string;
+  officialPortrait?: OfficialDriverPortrait;
 }) {
   const endpoint = wikipediaSummaryEndpoint(articleUrl);
-  const [imageFailed, setImageFailed] = useState(false);
+  const [officialImageFailed, setOfficialImageFailed] = useState(false);
+  const [wikipediaImageFailed, setWikipediaImageFailed] = useState(false);
+  const useOfficialImage = Boolean(
+    officialPortrait?.image_url && !officialImageFailed,
+  );
   const portrait = useQuery({
     queryKey: ["driver-portrait", endpoint],
     queryFn: async ({ signal }) => {
@@ -666,12 +688,23 @@ function DriverPortrait({
       if (!response.ok) return null;
       return (await response.json()) as WikipediaSummary;
     },
-    enabled: Boolean(endpoint),
+    enabled: Boolean(endpoint) && !useOfficialImage,
     staleTime: Infinity,
     retry: false,
   });
-  const imageUrl = portrait.data?.thumbnail?.source;
-  useEffect(() => setImageFailed(false), [imageUrl]);
+  const wikipediaImageUrl = portrait.data?.thumbnail?.source;
+  const imageUrl = useOfficialImage
+    ? officialPortrait?.image_url
+    : wikipediaImageUrl;
+  const imageFailed = useOfficialImage
+    ? officialImageFailed
+    : wikipediaImageFailed;
+  const sourceUrl = useOfficialImage
+    ? officialPortrait?.source_url
+    : articleUrl;
+  const sourceLabel = useOfficialImage ? "Formula 1" : "Wikipedia";
+  useEffect(() => setOfficialImageFailed(false), [officialPortrait?.image_url]);
+  useEffect(() => setWikipediaImageFailed(false), [wikipediaImageUrl]);
   const initials = fullName
     .split(/\s+/)
     .filter(Boolean)
@@ -686,14 +719,17 @@ function DriverPortrait({
           src={imageUrl}
           alt={`${fullName} portrait`}
           loading="lazy"
-          onError={() => setImageFailed(true)}
+          onError={() => {
+            if (useOfficialImage) setOfficialImageFailed(true);
+            else setWikipediaImageFailed(true);
+          }}
         />
       ) : (
         <span aria-hidden="true">{initials || "F1"}</span>
       )}
-      {articleUrl && imageUrl && !imageFailed && (
-        <a href={articleUrl} target="_blank" rel="noreferrer">
-          Photo: Wikipedia
+      {sourceUrl && imageUrl && !imageFailed && (
+        <a href={sourceUrl} target="_blank" rel="noreferrer">
+          Photo: {sourceLabel}
         </a>
       )}
     </div>
@@ -711,6 +747,30 @@ function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
     refetchInterval: (result) =>
       result.state.data?.availability === "awaiting_data" ? 3000 : false,
   });
+  const officialPortraits = useQuery({
+    queryKey: ["official-driver-portraits", currentYear],
+    queryFn: () =>
+      api<ApiEnvelope<OfficialDriverPortrait[]>>("/driver-portraits/current"),
+    enabled: kind === "drivers" && year === currentYear,
+    staleTime: 6 * 60 * 60 * 1000,
+    retry: false,
+  });
+  const officialPortraitByName = useMemo(
+    () =>
+      new globalThis.Map(
+        (officialPortraits.data?.data ?? [])
+          .filter((portrait) => portrait.season === year)
+          .flatMap((portrait) => {
+            const fullName = normalizedName(portrait.full_name);
+            const familyName = fullName.split(" ").at(-1) ?? fullName;
+            return [
+              [fullName, portrait] as const,
+              [familyName, portrait] as const,
+            ];
+          }),
+      ),
+    [officialPortraits.data?.data, year],
+  );
   const awaitingData = query.data?.availability === "awaiting_data";
   const rows = (query.data?.data ?? []).filter((r) =>
     JSON.stringify(r).toLowerCase().includes(search.toLowerCase()),
@@ -770,6 +830,11 @@ function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
                   <DriverPortrait
                     fullName={fullName || "Formula 1 driver"}
                     articleUrl={articleUrl}
+                    officialPortrait={officialPortraitByName.get(
+                      normalizedName(fullName),
+                    ) ?? officialPortraitByName.get(
+                      normalizedName(String(r.familyName ?? "")),
+                    )}
                   />
                 )}
                 <span>

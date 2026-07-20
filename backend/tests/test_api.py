@@ -109,6 +109,24 @@ def test_stored_archive_directory_does_not_queue_reimport():
     assert database.jobs.count_documents({"key": "season:1996"}) == 0
 
 
+def test_current_driver_portraits_are_exposed(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "get_official_driver_portraits", lambda: [{
+        "full_name": "Gabriel Bortoleto",
+        "image_url": "https://media.formula1.com/full-driver.webp",
+        "season": 2026,
+        "source_url": "https://www.formula1.com/en/drivers",
+    }])
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/driver-portraits/current")
+
+    assert response.status_code == 200
+    assert response.json()["availability"] == "available"
+    assert response.json()["data"][0]["full_name"] == "Gabriel Bortoleto"
+
+
 def test_missing_calendar_can_be_filled_by_single_service_fallback(monkeypatch):
     import app.main as main_module
 

@@ -1482,9 +1482,7 @@ export function SessionPage() {
     () => driverRosterQuery.data?.data ?? [],
     [driverRosterQuery.data?.data],
   );
-  const telemetryDrivers = driverRoster.filter(
-    (driver) => driver.telemetry_available,
-  );
+  const telemetryDrivers = driverRoster;
   const trackQuery = useQuery({
     queryKey: ["session", sessionId, "track"],
     queryFn: () => api<any>(`/sessions/${sessionId}/track`),

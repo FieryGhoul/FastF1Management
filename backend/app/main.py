@@ -386,24 +386,32 @@ def telemetry(
         value.strip() for value in channels.split(",")
         if value.strip() and len(value.strip()) <= 64
     ][:64]
+    on_demand_options = {
+        "drivers": ",".join(requested_drivers),
+        "laps": lap_selection,
+        "channels": "" if return_all_channels else ",".join(requested_channels),
+        "stream": stream,
+    }
     telemetry_state = db.dataset_status.find_one({
         "subject": session_id, "dataset": "telemetry",
     })
+    has_stored_telemetry = db.telemetry_laps.find_one(
+        {"session_id": session_id}, {"_id": 1},
+    ) is not None
     if (
         not telemetry_state
         or telemetry_state.get("schema_version") != TELEMETRY_SCHEMA_VERSION
         or telemetry_state.get("availability") == "awaiting_data"
+        or (
+            telemetry_state.get("availability") == "available"
+            and not has_stored_telemetry
+        )
     ) and on_demand_cache is not None:
         return on_demand_cache.get_or_schedule(
             background_tasks,
             session_id,
             "telemetry",
-            {
-                "drivers": ",".join(requested_drivers),
-                "laps": lap_selection,
-                "channels": ",".join(requested_channels),
-                "stream": stream,
-            },
+            on_demand_options,
         )
     if not telemetry_state:
         return {
@@ -475,6 +483,13 @@ def telemetry(
                 if point.get("Distance") is not None and point.get("Time") is not None:
                     point["Delta"] = point["Time"] - float(np.interp(point["Distance"], ref_distance, ref_time))
     if not traces:
+        if on_demand_cache is not None:
+            return on_demand_cache.get_or_schedule(
+                background_tasks,
+                session_id,
+                "telemetry",
+                on_demand_options,
+            )
         return {
             "availability": "unavailable",
             "unavailable_reason": (
@@ -528,7 +543,7 @@ def session_drivers(
         for code in db.telemetry_laps.distinct("driver", {"session_id": session_id})
         if code
     }
-    codes = telemetry_codes or set(by_code)
+    codes = telemetry_codes | set(by_code)
     season_drivers = {
         str(row.get("driverCode", "")).upper(): row
         for row in db.drivers.find(

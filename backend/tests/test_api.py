@@ -239,10 +239,47 @@ def test_session_driver_roster_returns_full_names_for_telemetry_dropdown():
         response = client.get("/api/v1/sessions/2026-1-R/drivers")
 
     assert response.status_code == 200
-    assert response.json()["data"] == [{
-        "code": "TST", "full_name": "Test Driver", "driver_number": "1",
-        "team_name": "Test Team", "telemetry_available": True,
-    }]
+    assert response.json()["data"] == [
+        {
+            "code": "RES", "full_name": "Reserve Driver", "driver_number": "2",
+            "team_name": "Test Team", "telemetry_available": False,
+        },
+        {
+            "code": "TST", "full_name": "Test Driver", "driver_number": "1",
+            "team_name": "Test Team", "telemetry_available": True,
+        },
+    ]
+
+
+def test_available_telemetry_marker_without_rows_uses_on_demand_repair(monkeypatch):
+    class RepairCache:
+        calls = []
+
+        def get_or_schedule(self, _tasks, session_id, kind, options):
+            self.calls.append((session_id, kind, options))
+            return {
+                "availability": "awaiting_data", "status": "queued",
+                "unavailable_reason": "Repairing missing telemetry rows.", "data": None,
+            }
+
+    import app.main as main_module
+
+    cache = RepairCache()
+    monkeypatch.setattr(main_module, "on_demand_cache", cache)
+    set_dataset_status(
+        database, "2026-10-R", "telemetry", "available", source="test",
+        schema_version=TELEMETRY_SCHEMA_VERSION,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/sessions/2026-10-R/telemetry?channels=all")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert cache.calls == [(
+        "2026-10-R", "telemetry",
+        {"drivers": "", "laps": "fastest", "channels": "", "stream": "merged"},
+    )]
 
 
 def test_telemetry_endpoint_exposes_original_car_stream():

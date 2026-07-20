@@ -3,6 +3,7 @@ import {
   Suspense,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -635,6 +636,19 @@ type OfficialDriverPortrait = {
   source_url: string;
 };
 
+type SportsDbPlayer = {
+  idPlayer?: string;
+  strPlayer?: string;
+  strSport?: string;
+  strCutout?: string | null;
+  strRender?: string | null;
+  strThumb?: string | null;
+};
+
+type SportsDbSearch = {
+  player?: SportsDbPlayer[] | null;
+};
+
 function normalizedName(value: string) {
   return value
     .normalize("NFD")
@@ -673,10 +687,63 @@ function DriverPortrait({
   officialPortrait?: OfficialDriverPortrait;
 }) {
   const endpoint = wikipediaSummaryEndpoint(articleUrl);
+  const portraitElement = useRef<HTMLDivElement>(null);
+  const [shouldLoadPortrait, setShouldLoadPortrait] = useState(false);
   const [officialImageFailed, setOfficialImageFailed] = useState(false);
+  const [sportsDbImageFailed, setSportsDbImageFailed] = useState(false);
   const [wikipediaImageFailed, setWikipediaImageFailed] = useState(false);
   const useOfficialImage = Boolean(
     officialPortrait?.image_url && !officialImageFailed,
+  );
+  useEffect(() => {
+    const element = portraitElement.current;
+    if (!element || shouldLoadPortrait) return;
+    if (!("IntersectionObserver" in window)) {
+      setShouldLoadPortrait(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setShouldLoadPortrait(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "240px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [shouldLoadPortrait]);
+  const sportsDbPortrait = useQuery({
+    queryKey: ["sports-db-driver-portrait", normalizedName(fullName)],
+    queryFn: async ({ signal }) => {
+      const response = await fetch(
+        `https://www.thesportsdb.com/api/v1/json/123/searchplayers.php?p=${encodeURIComponent(fullName)}`,
+        { headers: { Accept: "application/json" }, signal },
+      );
+      if (!response.ok) return null;
+      const result = (await response.json()) as SportsDbSearch;
+      const players = result.player ?? [];
+      return (
+        players.find(
+          (player) =>
+            player.strSport === "Motorsport" &&
+            normalizedName(player.strPlayer ?? "") === normalizedName(fullName),
+        ) ?? players.find((player) => player.strSport === "Motorsport") ?? null
+      );
+    },
+    enabled: shouldLoadPortrait && !useOfficialImage,
+    staleTime: Infinity,
+    gcTime: 24 * 60 * 60 * 1000,
+    retry: false,
+  });
+  const sportsDbImageUrl =
+    sportsDbPortrait.data?.strCutout ??
+    sportsDbPortrait.data?.strRender ??
+    sportsDbPortrait.data?.strThumb ??
+    undefined;
+  const useSportsDbImage = Boolean(
+    !useOfficialImage && sportsDbImageUrl && !sportsDbImageFailed,
   );
   const portrait = useQuery({
     queryKey: ["driver-portrait", endpoint],
@@ -688,22 +755,38 @@ function DriverPortrait({
       if (!response.ok) return null;
       return (await response.json()) as WikipediaSummary;
     },
-    enabled: Boolean(endpoint) && !useOfficialImage,
+    enabled:
+      shouldLoadPortrait &&
+      Boolean(endpoint) &&
+      !useOfficialImage &&
+      !useSportsDbImage &&
+      sportsDbPortrait.isFetched,
     staleTime: Infinity,
     retry: false,
   });
   const wikipediaImageUrl = portrait.data?.thumbnail?.source;
   const imageUrl = useOfficialImage
     ? officialPortrait?.image_url
-    : wikipediaImageUrl;
+    : useSportsDbImage
+      ? sportsDbImageUrl
+      : wikipediaImageUrl;
   const imageFailed = useOfficialImage
     ? officialImageFailed
-    : wikipediaImageFailed;
+    : useSportsDbImage
+      ? sportsDbImageFailed
+      : wikipediaImageFailed;
   const sourceUrl = useOfficialImage
     ? officialPortrait?.source_url
-    : articleUrl;
-  const sourceLabel = useOfficialImage ? "Formula 1" : "Wikipedia";
+    : useSportsDbImage
+      ? `https://www.thesportsdb.com/player/${sportsDbPortrait.data?.idPlayer ?? ""}`
+      : articleUrl;
+  const sourceLabel = useOfficialImage
+    ? "Formula 1"
+    : useSportsDbImage
+      ? "TheSportsDB"
+      : "Wikipedia";
   useEffect(() => setOfficialImageFailed(false), [officialPortrait?.image_url]);
+  useEffect(() => setSportsDbImageFailed(false), [sportsDbImageUrl]);
   useEffect(() => setWikipediaImageFailed(false), [wikipediaImageUrl]);
   const initials = fullName
     .split(/\s+/)
@@ -712,7 +795,7 @@ function DriverPortrait({
     .map((name) => name[0])
     .join("");
   return (
-    <div className="driver-portrait">
+    <div className="driver-portrait" ref={portraitElement}>
       {imageUrl && !imageFailed ? (
         <img
           className="driver-portrait-image"
@@ -721,6 +804,7 @@ function DriverPortrait({
           loading="lazy"
           onError={() => {
             if (useOfficialImage) setOfficialImageFailed(true);
+            else if (useSportsDbImage) setSportsDbImageFailed(true);
             else setWikipediaImageFailed(true);
           }}
         />

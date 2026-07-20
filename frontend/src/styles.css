@@ -787,6 +787,49 @@ p {
   bottom: -16px;
   color: var(--soft);
 }
+.driver-card {
+  min-height: 390px !important;
+}
+.driver-portrait {
+  height: 190px;
+  margin: -24px -24px 18px;
+  background: var(--soft);
+  display: grid;
+  place-items: center;
+  position: relative;
+  overflow: hidden;
+}
+.driver-portrait > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 22%;
+}
+.driver-portrait > span {
+  font: italic 800 76px/1 "Barlow Condensed Variable";
+  color: color-mix(in srgb, var(--muted) 35%, transparent);
+}
+.driver-portrait > a {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 4px 7px;
+  background: color-mix(in srgb, var(--bg) 84%, transparent);
+  color: var(--ink);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.driver-card h2 {
+  margin-top: 14px;
+}
+.driver-card > span,
+.driver-card > h2,
+.driver-card > small,
+.driver-card > p {
+  position: relative;
+  z-index: 1;
+}
 .circuit-grid > a {
   min-height: 300px;
 }

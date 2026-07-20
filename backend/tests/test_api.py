@@ -79,6 +79,36 @@ def test_missing_calendar_is_prioritized_and_reports_import_status():
     assert database.jobs.count_documents({"key": "season:2001"}) == 1
 
 
+def test_missing_archive_directories_prioritize_selected_season():
+    with TestClient(app) as client:
+        drivers = client.get("/api/v1/drivers?season=1997")
+        teams = client.get("/api/v1/constructors?season=1997")
+        standings = client.get("/api/v1/standings/1997/drivers")
+
+    for response in (drivers, teams, standings):
+        assert response.status_code == 200
+        assert response.json()["availability"] == "awaiting_data"
+        assert response.json()["status"] == "queued"
+        assert response.json()["job_id"]
+    job = database.jobs.find_one({"key": "season:1997"})
+    assert job["priority"] == 200
+    assert database.jobs.count_documents({"key": "season:1997"}) == 1
+
+
+def test_stored_archive_directory_does_not_queue_reimport():
+    database.drivers.insert_one({
+        "_id": "1996:hill", "season": 1996, "driverId": "hill",
+        "driverCode": "HIL", "givenName": "Damon", "familyName": "Hill",
+    })
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/drivers?season=1996")
+
+    assert response.json()["availability"] == "available"
+    assert response.json()["data"][0]["familyName"] == "Hill"
+    assert database.jobs.count_documents({"key": "season:1996"}) == 0
+
+
 def test_missing_calendar_can_be_filled_by_single_service_fallback(monkeypatch):
     import app.main as main_module
 

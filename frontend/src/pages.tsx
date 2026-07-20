@@ -542,7 +542,10 @@ export function StandingsPage() {
     queryKey: ["standings", year, kind],
     queryFn: () =>
       api<ApiEnvelope<Record<string, unknown>[]>>(`/standings/${year}/${kind}`),
+    refetchInterval: (result) =>
+      result.state.data?.availability === "awaiting_data" ? 3000 : false,
   });
+  const awaitingData = query.data?.availability === "awaiting_data";
   const drivers = [
     { key: "position", label: "Pos" },
     {
@@ -582,6 +585,15 @@ export function StandingsPage() {
           title="Loading standings"
           copy="Reading the championship table."
         />
+      ) : awaitingData ? (
+        <Empty
+          loading
+          title={`Preparing ${year} standings`}
+          copy={
+            query.data?.unavailable_reason ??
+            "The selected season is queued for import."
+          }
+        />
       ) : (
         <div className="data-view">
           <div className="data-view-toolbar">
@@ -612,6 +624,81 @@ export function StandingsPage() {
   );
 }
 
+type WikipediaSummary = {
+  thumbnail?: { source?: string };
+};
+
+function wikipediaSummaryEndpoint(articleUrl: string | undefined) {
+  if (!articleUrl) return undefined;
+  try {
+    const url = new URL(articleUrl);
+    if (!url.hostname.endsWith(".wikipedia.org")) return undefined;
+    const marker = "/wiki/";
+    const titleStart = url.pathname.indexOf(marker);
+    if (titleStart < 0) return undefined;
+    const language = url.hostname.split(".")[0];
+    if (!/^[a-z-]+$/.test(language)) return undefined;
+    const title = decodeURIComponent(
+      url.pathname.slice(titleStart + marker.length),
+    );
+    return `https://${language}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function DriverPortrait({
+  fullName,
+  articleUrl,
+}: {
+  fullName: string;
+  articleUrl?: string;
+}) {
+  const endpoint = wikipediaSummaryEndpoint(articleUrl);
+  const [imageFailed, setImageFailed] = useState(false);
+  const portrait = useQuery({
+    queryKey: ["driver-portrait", endpoint],
+    queryFn: async ({ signal }) => {
+      const response = await fetch(endpoint!, {
+        headers: { Accept: "application/json" },
+        signal,
+      });
+      if (!response.ok) return null;
+      return (await response.json()) as WikipediaSummary;
+    },
+    enabled: Boolean(endpoint),
+    staleTime: Infinity,
+    retry: false,
+  });
+  const imageUrl = portrait.data?.thumbnail?.source;
+  useEffect(() => setImageFailed(false), [imageUrl]);
+  const initials = fullName
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((name) => name[0])
+    .join("");
+  return (
+    <div className="driver-portrait">
+      {imageUrl && !imageFailed ? (
+        <img
+          src={imageUrl}
+          alt={`${fullName} portrait`}
+          loading="lazy"
+          onError={() => setImageFailed(true)}
+        />
+      ) : (
+        <span aria-hidden="true">{initials || "F1"}</span>
+      )}
+      {articleUrl && imageUrl && !imageFailed && (
+        <a href={articleUrl} target="_blank" rel="noreferrer">
+          Photo: Wikipedia
+        </a>
+      )}
+    </div>
+  );
+}
+
 function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
   const [year, setYear] = useState(currentYear),
     [search, setSearch] = useState(""),
@@ -620,7 +707,10 @@ function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
     queryKey: [kind, year],
     queryFn: () =>
       api<ApiEnvelope<Record<string, unknown>[]>>(`/${kind}?season=${year}`),
+    refetchInterval: (result) =>
+      result.state.data?.availability === "awaiting_data" ? 3000 : false,
   });
+  const awaitingData = query.data?.availability === "awaiting_data";
   const rows = (query.data?.data ?? []).filter((r) =>
     JSON.stringify(r).toLowerCase().includes(search.toLowerCase()),
   );
@@ -651,47 +741,67 @@ function EntityDirectory({ kind }: { kind: "drivers" | "constructors" }) {
       </div>
       {query.error ? (
         <ErrorState error={query.error} />
+      ) : query.isLoading || awaitingData ? (
+        <Empty
+          loading
+          title={
+            query.isLoading
+              ? `Loading ${kind}`
+              : `Preparing ${year} ${kind === "drivers" ? "drivers" : "teams"}`
+          }
+          copy={
+            query.data?.unavailable_reason ?? "Reading the season entry list."
+          }
+        />
       ) : showAllFields ? (
         <DataTable columns={allDataColumns(rows)} rows={rows} />
       ) : (
         <div className="entity-grid">
-          {rows.map((r, i) => (
-            <article key={String(r.driverId ?? r.constructorId ?? i)}>
-              <span>
-                {kind === "drivers"
-                  ? String(r.driverNumber ?? r.driverCode ?? "—")
-                  : String(i + 1).padStart(2, "0")}
-              </span>
-              <h2>
-                {kind === "drivers"
-                  ? `${r.givenName ?? ""} ${r.familyName ?? ""}`
-                  : String(r.constructorName ?? r.name ?? "Unknown")}
-              </h2>
-              {kind === "drivers" && (
-                <small className="entity-short-name">
-                  {String(r.driverCode ?? "—").toUpperCase()}
-                </small>
-              )}
-              <p>
-                {String(
-                  r.driverNationality ??
-                    r.constructorNationality ??
-                    "Nationality unavailable",
+          {rows.map((r, i) => {
+            const fullName = `${r.givenName ?? ""} ${r.familyName ?? ""}`.trim();
+            const articleUrl = String(r.driverUrl ?? r.url ?? "") || undefined;
+            return (
+              <article
+                className={kind === "drivers" ? "driver-card" : undefined}
+                key={String(r.driverId ?? r.constructorId ?? i)}
+              >
+                {kind === "drivers" && (
+                  <DriverPortrait
+                    fullName={fullName || "Formula 1 driver"}
+                    articleUrl={articleUrl}
+                  />
                 )}
-              </p>
-              <div className="entity-code">
-                {String(r.driverCode ?? r.constructorId ?? "F1").toUpperCase()}
-              </div>
-            </article>
-          ))}
+                <span>
+                  {kind === "drivers"
+                    ? String(r.driverNumber ?? r.driverCode ?? "—")
+                    : String(i + 1).padStart(2, "0")}
+                </span>
+                <h2>
+                  {kind === "drivers"
+                    ? `${r.givenName ?? ""} ${r.familyName ?? ""}`
+                    : String(r.constructorName ?? r.name ?? "Unknown")}
+                </h2>
+                {kind === "drivers" && (
+                  <small className="entity-short-name">
+                    {String(r.driverCode ?? "—").toUpperCase()}
+                  </small>
+                )}
+                <p>
+                  {String(
+                    r.driverNationality ??
+                      r.constructorNationality ??
+                      "Nationality unavailable",
+                  )}
+                </p>
+                <div className="entity-code">
+                  {String(
+                    r.driverCode ?? r.constructorId ?? "F1",
+                  ).toUpperCase()}
+                </div>
+              </article>
+            );
+          })}
         </div>
-      )}
-      {query.isLoading && (
-        <Empty
-          loading
-          title={`Loading ${kind}`}
-          copy="Reading the season entry list."
-        />
       )}
     </div>
   );

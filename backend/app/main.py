@@ -106,6 +106,34 @@ def _process_calendar_job_inline(job_id: str, season: int) -> None:
         database.jobs.update_one({"_id": job_id}, {"$set": update})
 
 
+def _validate_archive_season(season: int) -> None:
+    if season < 1950 or season > utcnow().year + 1:
+        raise HTTPException(422, "Season is outside the supported range")
+
+
+def _request_season_import(
+    background_tasks: BackgroundTasks,
+    db: Database,
+    season: int,
+) -> dict[str, Any]:
+    """Prioritize a season selected in any public archive view."""
+    _validate_archive_season(season)
+    job = queue_job(
+        db,
+        "season",
+        f"season:{season}",
+        {"season": season},
+        priority=200,
+    )
+    if on_demand_cache is not None:
+        background_tasks.add_task(
+            _process_calendar_job_inline,
+            job["_id"],
+            season,
+        )
+    return job
+
+
 def _recent_session_rate(completions: list[dict[str, Any]]) -> tuple[float | None, int]:
     """Estimate active ingestion throughput without counting idle pauses.
 
@@ -228,8 +256,7 @@ def calendar(
     background_tasks: BackgroundTasks,
     db: Database = Depends(get_db),
 ) -> dict:
-    if season < 1950 or season > utcnow().year + 1:
-        raise HTTPException(422, "Season is outside the supported range")
+    _validate_archive_season(season)
     rows = [public_document(row) for row in db.events.find({"season": season}).sort("round", ASCENDING)]
     state = db.dataset_status.find_one({"subject": str(season), "dataset": "calendar"})
     job = None
@@ -237,19 +264,7 @@ def calendar(
         # A season selected by a visitor should jump ahead of the background
         # archive sweep. queue_job is idempotent while work is pending, so the
         # calendar can safely poll this endpoint until the worker stores it.
-        job = queue_job(
-            db,
-            "season",
-            f"season:{season}",
-            {"season": season},
-            priority=200,
-        )
-        if on_demand_cache is not None:
-            background_tasks.add_task(
-                _process_calendar_job_inline,
-                job["_id"],
-                season,
-            )
+        job = _request_season_import(background_tasks, db, season)
     return {
         "data": rows,
         "season": season,
@@ -295,24 +310,48 @@ def live(db: Database = Depends(get_db)) -> dict:
 
 
 @app.get("/api/v1/standings/{season}/{kind}")
-def standings(season: int, kind: Literal["drivers", "constructors"], round_number: int | None = Query(None, alias="round"), db: Database = Depends(get_db)) -> dict:
+def standings(
+    season: int,
+    kind: Literal["drivers", "constructors"],
+    background_tasks: BackgroundTasks,
+    round_number: int | None = Query(None, alias="round"),
+    db: Database = Depends(get_db),
+) -> dict:
+    _validate_archive_season(season)
     query = {"season": season, "kind": kind}
     if round_number is not None:
         query["round"] = round_number
     row = db.standings.find_one(query, sort=[("synced_at", DESCENDING)])
+    job = None
+    if not row and round_number is None and season <= utcnow().year:
+        job = _request_season_import(background_tasks, db, season)
     return {
         "data": row.get("data", []) if row else [], "source": "MongoDB",
         "season": season, "round": round_number,
         "availability": "available" if row else "awaiting_data",
-        "unavailable_reason": None if row else "Standings have not been ingested for this selection.",
+        "unavailable_reason": None if row else f"The {season} season is queued for import. Standings will appear automatically.",
         "updated_at": row.get("synced_at") if row else None,
+        "job_id": job.get("_id") if job else None,
+        "status": job.get("status") if job else None,
     }
 
 
 @app.get("/api/v1/drivers")
-def drivers(season: int = Query(default_factory=lambda: utcnow().year), db: Database = Depends(get_db)) -> dict:
+def drivers(
+    background_tasks: BackgroundTasks,
+    season: int = Query(default_factory=lambda: utcnow().year),
+    db: Database = Depends(get_db),
+) -> dict:
+    _validate_archive_season(season)
     rows = [public_document(row) for row in db.drivers.find({"season": season}).sort("driverCode", ASCENDING)]
-    return {"data": rows, "season": season, "source": "MongoDB", "availability": "available" if rows else "awaiting_data"}
+    job = _request_season_import(background_tasks, db, season) if not rows and season <= utcnow().year else None
+    return {
+        "data": rows, "season": season, "source": "MongoDB",
+        "availability": "available" if rows else "awaiting_data",
+        "unavailable_reason": None if rows else f"The {season} season is queued for import. Drivers will appear automatically.",
+        "job_id": job.get("_id") if job else None,
+        "status": job.get("status") if job else None,
+    }
 
 
 @app.get("/api/v1/drivers/{driver_id}")
@@ -324,9 +363,21 @@ def driver(driver_id: str, season: int = Query(default_factory=lambda: utcnow().
 
 
 @app.get("/api/v1/constructors")
-def constructors(season: int = Query(default_factory=lambda: utcnow().year), db: Database = Depends(get_db)) -> dict:
+def constructors(
+    background_tasks: BackgroundTasks,
+    season: int = Query(default_factory=lambda: utcnow().year),
+    db: Database = Depends(get_db),
+) -> dict:
+    _validate_archive_season(season)
     rows = [public_document(row) for row in db.constructors.find({"season": season}).sort("constructorName", ASCENDING)]
-    return {"data": rows, "season": season, "source": "MongoDB", "availability": "available" if rows else "awaiting_data"}
+    job = _request_season_import(background_tasks, db, season) if not rows and season <= utcnow().year else None
+    return {
+        "data": rows, "season": season, "source": "MongoDB",
+        "availability": "available" if rows else "awaiting_data",
+        "unavailable_reason": None if rows else f"The {season} season is queued for import. Teams will appear automatically.",
+        "job_id": job.get("_id") if job else None,
+        "status": job.get("status") if job else None,
+    }
 
 
 @app.get("/api/v1/constructors/{constructor_id}")

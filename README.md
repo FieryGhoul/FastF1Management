@@ -102,7 +102,3 @@ npm run build
 ```
 
 Tests use an in-memory MongoDB-compatible test double and do not require live upstream requests.
-
-## Legacy application
-
-The original Oracle/Tkinter application remains preserved under `legacy/oracle-tkinter/`. It is not imported or used by the active runtime.

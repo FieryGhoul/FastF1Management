@@ -1,0 +1,122 @@
+previews:
+  generation: "off"
+
+services:
+  - type: pserv
+    name: race-data-api
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 60
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+    envVars:
+      - key: MONGODB_URL
+        sync: false
+      - key: MONGODB_DATABASE
+        value: race_data
+      - key: FRONTEND_HOSTNAME
+        fromService:
+          type: web
+          name: race-data-web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: HISTORICAL_BACKFILL_ENABLED
+        value: "false"
+      - key: TELEMETRY_BACKFILL_ENABLED
+        value: "false"
+
+  - type: web
+    name: race-data-web
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    autoDeployTrigger: commit
+    healthCheckPath: /api/v1/ready
+    buildFilter:
+      paths:
+        - frontend/**
+        - render.yaml
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: API_HOSTPORT
+        fromService:
+          type: pserv
+          name: race-data-api
+          property: hostport
+
+  - type: worker
+    name: race-data-worker
+    runtime: docker
+    plan: standard
+    region: singapore
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: python -m app.worker
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 300
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+    disk:
+      name: fastf1-cache
+      mountPath: /cache
+      sizeGB: 10
+    envVars:
+      - key: MONGODB_URL
+        fromService:
+          type: pserv
+          name: race-data-api
+          envVarKey: MONGODB_URL
+      - key: MONGODB_DATABASE
+        value: race_data
+      - key: FASTF1_CACHE
+        value: /cache/fastf1
+      - key: HISTORICAL_BACKFILL_ENABLED
+        value: "false"
+      - key: TELEMETRY_BACKFILL_ENABLED
+        value: "false"
+
+  - type: worker
+    name: race-data-scheduler
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: python -m app.scheduler
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 60
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+    envVars:
+      - key: MONGODB_URL
+        fromService:
+          type: pserv
+          name: race-data-api
+          envVarKey: MONGODB_URL
+      - key: MONGODB_DATABASE
+        value: race_data
+      - key: HISTORICAL_BACKFILL_ENABLED
+        value: "false"
+      - key: HISTORICAL_BACKFILL_START
+        value: "2000"
+      - key: TELEMETRY_BACKFILL_ENABLED
+        value: "false"

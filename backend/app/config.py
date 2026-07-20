@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     mongodb_url: str = "mongodb://localhost:27017"
     mongodb_database: str = "race_data"
     frontend_origin: str = "http://localhost:5173"
+    frontend_hostname: str | None = None
     fastf1_cache: Path = Path(".cache/fastf1")
     admin_username: str = "admin"
     admin_password: str = "change-me"
@@ -22,6 +23,15 @@ class Settings(BaseSettings):
     # Keep shared/root defaults available, but let backend/.env override them
     # for local development when commands are run from the backend directory.
     model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
+
+    @property
+    def frontend_origins(self) -> list[str]:
+        origins = [self.frontend_origin.rstrip("/")]
+        if self.frontend_hostname:
+            hostname = self.frontend_hostname.strip().strip("/")
+            if hostname:
+                origins.append(f"https://{hostname}")
+        return list(dict.fromkeys(origins))
 
 
 @lru_cache

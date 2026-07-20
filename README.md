@@ -91,6 +91,17 @@ persistent `mongo_data` and `fastf1_cache` volumes. On a new database, the
 archive loader must pass its deep completion audit before Compose starts the
 normal worker and scheduler.
 
+## Deploy on Render
+
+The repository includes a [`render.yaml`](render.yaml) Blueprint for the
+public Nginx frontend, private FastAPI service, ingestion worker and scheduler.
+Production MongoDB runs on MongoDB Atlas; it is intentionally not provisioned
+inside Render. Full historical loaders are opt-in because they are long-running
+and billed separately.
+
+See [`docs/render.md`](docs/render.md) for Atlas setup, Blueprint deployment,
+data migration, historical backfill and production verification.
+
 ## Scheduler policy
 
 - Current schedule: every six hours, or every five minutes within 36 hours of a session.
